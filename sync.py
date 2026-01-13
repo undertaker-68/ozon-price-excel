@@ -320,33 +320,37 @@ def ozon_import_prices(client_id: str, api_key: str, items: List[Dict[str, Any]]
 
 # ---------- MoySklad fetchers ----------
 
-def fetch_ms_products_by_articles(ms_token: str, articles: List[str]) -> Dict[str, Dict[str, Any]]:
-    out: Dict[str, Dict[str, Any]] = {}
+def fetch_ms_products_by_articles(ms_token: str, offer_ids: List[str]) -> Dict[str, Dict[str, Any]]:
+    # параметры кеша
+    cache_path = os.environ.get("MS_CACHE_PATH", "/root/google_ozon_prices/.cache/ms_catalog.json")
+    ttl_sec = int(os.environ.get("MS_CACHE_TTL_SECONDS", "900"))  # 15 минут
 
-    for idx, art in enumerate(articles, start=1):
-        params = {"filter": f"article={art}"}
+    cached = ms_load_catalog_cache(cache_path, ttl_sec)
+    if cached is not None:
+        # cached = { "00022": {...}, ... }
+        return {oid: cached.get(oid, {}) for oid in offer_ids}
 
-        data = ms_get(ms_token, "/entity/product", params=params)
-        rows = data.get("rows", [])
-        if rows:
-            out[art] = rows[0]
-        else:
-            data_b = ms_get(ms_token, "/entity/bundle", params=params)
-            rows_b = data_b.get("rows", [])
-            if rows_b:
-                out[art] = rows_b[0]
-            else:
-                # variant: нет фильтра article, используем code
-                data_v = ms_get(ms_token, "/entity/variant", params={"filter": f"code={art}"})
-                rows_v = data_v.get("rows", [])
-                if rows_v:
-                    out[art] = rows_v[0]
+    # 1) забираем все products и bundles (можно ограничить archived=false)
+    # если хочешь включать архив: убери filters
+    filters = "archived=false"
+    products = ms_list_all(ms_token, "/entity/product", filters=filters)
+    bundles  = ms_list_all(ms_token, "/entity/bundle",  filters=filters)
 
-        # мягкий pacing
-        time.sleep(0.05 if idx % 20 else 0.25)
+    catalog: Dict[str, Dict[str, Any]] = {}
 
-    return out
+    for it in products:
+        art = it.get("article")
+        if art:
+            catalog[str(art)] = it
 
+    for it in bundles:
+        art = it.get("article")
+        if art and art not in catalog:
+            catalog[str(art)] = it
+
+    ms_save_catalog_cache(cache_path, catalog)
+
+    return {oid: catalog.get(oid, {}) for oid in offer_ids}
 
 # ---------- Google Sheets ----------
 
