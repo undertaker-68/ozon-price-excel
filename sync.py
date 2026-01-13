@@ -225,6 +225,61 @@ def connect_sheet(service_account_json: str, spreadsheet_id: str, worksheet_name
         ws = sh.add_worksheet(title=worksheet_name, rows=1000, cols=20)
     return ws
 
+def _cell_to_number(val: str):
+    # превращаем "2 188" / "2188" / "" в число или None
+    if val is None:
+        return None
+    s = str(val).strip().replace(" ", "").replace("\u00A0", "")
+    if s == "":
+        return None
+    try:
+        return float(s)
+    except ValueError:
+        return None
+
+def read_existing_sheet_prices(ws):
+    """
+    Возвращает:
+      existing_keys: set((cab, offer_id))
+      existing_prices: dict((cab, offer_id) -> {"old_price":..., "min_price":..., "your_price":...})
+    Колонки (1-based):
+      cab=A=1, offer_id=E=5, old_price=G=7, min_price=H=8, your_price=I=9
+    """
+    CAB_COL = 1
+    OFFER_COL = 5
+    OLD_COL = 7
+    MIN_COL = 8
+    YOUR_COL = 9
+
+    values = ws.get_all_values()
+    existing_prices = {}
+    existing_keys = set()
+
+    # пропускаем header (row 1)
+    for row in values[1:]:
+        # защита от коротких строк
+        def get(col1):
+            return row[col1 - 1] if len(row) >= col1 else ""
+
+        cab = str(get(CAB_COL)).strip()
+        offer_id = str(get(OFFER_COL)).strip().lstrip("'")  # если было '00022
+        if not cab or not offer_id:
+            continue
+
+        old_price = _cell_to_number(get(OLD_COL))
+        min_price = _cell_to_number(get(MIN_COL))
+        your_price = _cell_to_number(get(YOUR_COL))
+
+        key = (cab, offer_id)
+        existing_keys.add(key)
+        existing_prices[key] = {
+            "old_price": old_price,
+            "min_price": min_price,
+            "your_price": your_price,
+        }
+
+    return existing_keys, existing_prices
+
 
 def write_rows_to_sheet(ws, header: List[str], rows: List[List[Any]]) -> None:
     # Clear then update
@@ -238,17 +293,22 @@ def build_rows_for_cabinet(
     client_id: str,
     api_key: str,
     ms_token: str,
-) -> List[Dict[str, Any]]:
+    existing_keys: set,
+    existing_prices: dict,
+) -> (List[Dict[str, Any]], List[Dict[str, Any]]):
+
     # 1) list products
     prod_items = fetch_ozon_product_list(client_id, api_key)
     offer_ids = [str(x.get("offer_id")) for x in prod_items if x.get("offer_id")]
+    new_offer_ids = [oid for oid in offer_ids if (cab_label, oid) not in existing_keys]
+    existing_offer_ids = [oid for oid in offer_ids if (cab_label, oid) in existing_keys]
     product_ids = [int(x.get("product_id")) for x in prod_items if x.get("product_id") is not None]
 
     # 2) info list (gives category/type ids, and string prices)
     info_map = fetch_ozon_info_by_product_ids(client_id, api_key, product_ids)
 
     # 3) prices list (numbers, includes marketing_seller_price)
-    prices_map = fetch_ozon_prices_by_offer_ids(client_id, api_key, offer_ids)
+    prices_map = fetch_ozon_prices_by_offer_ids(client_id, api_key, new_offer_ids)
 
     # 4) category/type name dictionaries
     category_map, type_map = fetch_ozon_tree_maps(client_id, api_key)
@@ -258,6 +318,7 @@ def build_rows_for_cabinet(
 
     # 6) build flat rows
     result: List[Dict[str, Any]] = []
+    to_push = []
     for offer_id in offer_ids:
         info = info_map.get(offer_id, {})
         price = prices_map.get(offer_id, {})
@@ -283,7 +344,7 @@ def build_rows_for_cabinet(
             "category": category_name,
             "type": type_name,
             "ms_name": ms_name,
-            "offer_id": offer_id_sheet,
+            "offer_id": "'" + offer_id,
             "buy_price": buy_price,
             "old_price": old_price,
             "min_price": min_price,
