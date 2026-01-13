@@ -45,7 +45,7 @@ def ozon_post(client_id: str, api_key: str, path: str, payload: Dict[str, Any], 
 
 
 def ms_get(ms_token, path, params=None, timeout=60):
-    url = MS_BASE_URL + path
+    url = MS_BASE + path
     headers = {
         "Authorization": f"Bearer {ms_token}",
         "Accept": "application/json;charset=utf-8",
