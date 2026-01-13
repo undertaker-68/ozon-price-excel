@@ -45,23 +45,26 @@ def ozon_post(client_id: str, api_key: str, path: str, payload: Dict[str, Any], 
 
 
 def ms_get(ms_token, path, params=None, timeout=60):
-    url = MS_BASE + path
+    url = f"{MS_BASE}{path}"
     headers = {
         "Authorization": f"Bearer {ms_token}",
         "Accept": "application/json;charset=utf-8",
     }
 
-    # ретраи: 429 (лимиты) + временные 5xx
     attempts = 8
     for attempt in range(1, attempts + 1):
-        resp = requests.get(url, headers=headers, params=params, timeout=timeout)
+        try:
+            resp = requests.get(url, headers=headers, params=params, timeout=timeout)
+        except (requests.exceptions.ReadTimeout, requests.exceptions.ConnectTimeout, requests.exceptions.SSLError) as e:
+            sleep_s = min(30.0, 2.0 * attempt)
+            print(f"MoySklad network timeout/ssl, sleep {sleep_s:.1f}s (attempt {attempt}/{attempts})")
+            time.sleep(sleep_s)
+            continue
 
         if resp.status_code == 200:
             return resp.json()
 
-        # MoySklad rate limit
         if resp.status_code == 429:
-            # MoySklad часто присылает интервалы в заголовках
             retry_ms = resp.headers.get("X-Lognex-Retry-TimeInterval") or resp.headers.get("X-Lognex-Retry-After")
             if retry_ms:
                 try:
@@ -69,14 +72,11 @@ def ms_get(ms_token, path, params=None, timeout=60):
                 except Exception:
                     sleep_s = 3.0
             else:
-                # запасной бэкофф
                 sleep_s = min(30.0, 2.0 * attempt)
-
             print(f"MoySklad 429 rate limit, sleep {sleep_s:.1f}s (attempt {attempt}/{attempts})")
             time.sleep(sleep_s)
             continue
 
-        # временные ошибки
         if resp.status_code in (500, 502, 503, 504):
             sleep_s = min(30.0, 2.0 * attempt)
             print(f"MoySklad {resp.status_code}, sleep {sleep_s:.1f}s (attempt {attempt}/{attempts})")
@@ -85,7 +85,7 @@ def ms_get(ms_token, path, params=None, timeout=60):
 
         raise RuntimeError(f"MoySklad {path} failed {resp.status_code}: {resp.text}")
 
-    raise RuntimeError(f"MoySklad {path} failed after {attempts} attempts (last status {resp.status_code}): {resp.text}")
+    raise RuntimeError(f"MoySklad {path} failed after {attempts} attempts")
 
 def fetch_ozon_tree_maps(client_id: str, api_key: str) -> Tuple[Dict[int, str], Dict[int, str]]:
     """Returns (category_id->name, type_id->name) parsed from /v1/description-category/tree."""
