@@ -22,7 +22,7 @@ J=10 buyer_price (Цена для покупателя)
 """
 
 import os
-import time
+import json, time
 from typing import Any, Dict, List, Optional, Tuple, Set
 
 import requests
@@ -162,6 +162,36 @@ def ms_get(ms_token: str, path: str, params: Optional[Dict[str, Any]] = None, ti
 
 
 # ---------- Ozon fetchers ----------
+
+def ms_list_all(ms_token: str, path: str, *, limit: int = 1000, filters: Optional[str] = None) -> List[Dict[str, Any]]:
+    rows: List[Dict[str, Any]] = []
+    offset = 0
+    while True:
+        params = {"limit": limit, "offset": offset}
+        if filters:
+            params["filter"] = filters
+        data = ms_get(ms_token, path, params=params)
+        chunk = data.get("rows") or []
+        rows.extend(chunk)
+        if len(chunk) < limit:
+            break
+        offset += limit
+    return rows
+
+def ms_load_catalog_cache(cache_path: str, ttl_sec: int) -> Optional[Dict[str, Dict[str, Any]]]:
+    try:
+        st = os.stat(cache_path)
+        if time.time() - st.st_mtime > ttl_sec:
+            return None
+        with open(cache_path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+def ms_save_catalog_cache(cache_path: str, data: Dict[str, Dict[str, Any]]) -> None:
+    os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+    with open(cache_path, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False)
 
 def fetch_ozon_tree_maps(client_id: str, api_key: str) -> Tuple[Dict[int, str], Dict[int, str]]:
     data = ozon_post(client_id, api_key, "/v1/description-category/tree", {"language": "RU"})
