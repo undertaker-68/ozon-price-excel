@@ -182,11 +182,11 @@ def fetch_ms_products_by_articles(ms_token: str, articles: List[str]) -> Dict[st
             if rows_b:
                 out[art] = rows_b[0]
             else:
-                # 3) variant
-                data_v = ms_get(ms_token, "/entity/variant", params=params)
+                # 3) variant (у variant нет фильтра article, используем code)
+                data_v = ms_get(ms_token, "/entity/variant", params={"filter": f"code={art}"})
                 rows_v = data_v.get("rows", [])
                 if rows_v:
-                    out[art] = rows_v[0]
+                  out[art] = rows_v[0]
 
         # pacing
         if idx % 20 == 0:
