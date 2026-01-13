@@ -393,22 +393,54 @@ def build_rows_for_cabinet(
     existing_offer_ids = [oid for oid in offer_ids if (cab_label, oid) in existing_keys]
     new_offer_ids = [oid for oid in offer_ids if (cab_label, oid) not in existing_keys]
 
-    # PUSH в Ozon для "старых"
+        # PUSH в Ozon только для изменённых "старых"
     if push_price and existing_offer_ids:
+        # тянем текущие цены Ozon для сравнения (одним запросом)
+        oz_existing = fetch_ozon_prices_by_offer_ids(client_id, api_key, existing_offer_ids)
+
         to_push: List[Dict[str, Any]] = []
+        changed_cnt = 0
+
         for oid in existing_offer_ids:
-            p = existing_prices.get((cab_label, oid), {})
-            to_push.append({
-                "offer_id": oid,
-                "old_price": p.get("old_price"),
-                "min_price": p.get("min_price"),
-                "price": p.get("your_price"),
-            })
-        try:
-            ozon_import_prices(client_id, api_key, to_push)
-            print(f"{cab_label}: pushed prices for {len(existing_offer_ids)} items")
-        except Exception as e:
-            print(f"{cab_label}: FAILED to push prices: {e}")
+            sheet_p = existing_prices.get((cab_label, oid), {}) or {}
+
+            sheet_old  = sheet_p.get("old_price")
+            sheet_min  = sheet_p.get("min_price")
+            sheet_your = sheet_p.get("your_price")
+
+            oz_p = oz_existing.get(oid, {}) or {}
+            oz_old  = money_from_ozon(oz_p.get("old_price"))
+            oz_min  = money_from_ozon(oz_p.get("min_price"))
+            oz_your = money_from_ozon(oz_p.get("marketing_seller_price"))
+
+            row: Dict[str, Any] = {"offer_id": oid}
+            any_change = False
+
+            # отправляем только непустое и только если отличается
+            if sheet_old is not None and _price_changed(sheet_old, oz_old):
+                row["old_price"] = sheet_old
+                any_change = True
+
+            if sheet_min is not None and _price_changed(sheet_min, oz_min):
+                row["min_price"] = sheet_min
+                any_change = True
+
+            if sheet_your is not None and _price_changed(sheet_your, oz_your):
+                row["price"] = sheet_your
+                any_change = True
+
+            if any_change:
+                to_push.append(row)
+                changed_cnt += 1
+
+        if to_push:
+            try:
+                ozon_import_prices(client_id, api_key, to_push)
+                print(f"{cab_label}: pushed changed prices for {changed_cnt} items (of {len(existing_offer_ids)})")
+            except Exception as e:
+                print(f"{cab_label}: FAILED to push changed prices: {e}")
+        else:
+            print(f"{cab_label}: no price changes to push (of {len(existing_offer_ids)})")
 
     # цены тянем из Ozon только для новых
     prices_map_new = fetch_ozon_prices_by_offer_ids(client_id, api_key, new_offer_ids)
