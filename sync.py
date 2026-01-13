@@ -174,6 +174,53 @@ def fetch_ozon_prices_by_offer_ids(client_id: str, api_key: str, offer_ids: List
                 out[normalize_offer_id(offer_id)] = price
     return out
 
+def ozon_import_prices(client_id: str, api_key: str, items: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """
+    Отправка цен в Ozon из таблицы.
+    Эндпоинт: POST /v1/product/import/prices
+    items: [{"offer_id": "...", "price": 1843, "old_price": 2188, "min_price": 1732}, ...]
+    """
+    url = "https://api-seller.ozon.ru/v1/product/import/prices"
+    headers = {
+        "Client-Id": client_id,
+        "Api-Key": api_key,
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+    }
+
+    payload = {"prices": []}
+    for it in items:
+        offer_id = normalize_offer_id(it.get("offer_id"))
+        if not offer_id:
+            continue
+
+        p = it.get("price")
+        op = it.get("old_price")
+        mp = it.get("min_price")
+
+        # пропускаем полностью пустые
+        if p is None and op is None and mp is None:
+            continue
+
+        # Важно: отправляем числа (рубли). Если Ozon потребует строки — поменяем тут в одном месте.
+        row = {"offer_id": offer_id}
+        if p is not None:
+            row["price"] = int(p)
+        if op is not None:
+            row["old_price"] = int(op)
+        if mp is not None:
+            row["min_price"] = int(mp)
+
+        payload["prices"].append(row)
+
+    if not payload["prices"]:
+        return {"skipped": True, "reason": "no prices to push"}
+
+    resp = requests.post(url, headers=headers, json=payload, timeout=60)
+    if resp.status_code != 200:
+        raise RuntimeError(f"Ozon import prices failed {resp.status_code}: {resp.text}")
+    return resp.json()
+
 
 def fetch_ms_products_by_articles(ms_token: str, articles: List[str]) -> Dict[str, Dict[str, Any]]:
     """Returns article -> MS entity row (product/bundle/variant).
@@ -302,8 +349,8 @@ def build_rows_for_cabinet(
     client_id: str,
     api_key: str,
     ms_token: str,
-    existing_keys: Set[Tuple[str, str]],
-    existing_prices: Dict[Tuple[str, str], Dict[str, Optional[float]]],
+    existing_prices: Dict[Tuple[str, str], Dict[str, int]],
+    push_price: bool,
 ) -> List[Dict[str, Any]]:
 
     prod_items = fetch_ozon_product_list(client_id, api_key)
@@ -318,6 +365,26 @@ def build_rows_for_cabinet(
 
     # новые offer_id (для них тянем 3 поля цен из Ozon)
     new_offer_ids = [oid for oid in offer_ids if (cab_label, oid) not in existing_keys]
+
+        # 2.4) PUSH: для товаров, которые уже есть в таблице, отправляем цены в Ozon из таблицы
+    if push_price and existing_offer_ids:
+        to_push: List[Dict[str, Any]] = []
+        for oid in existing_offer_ids:
+            p = existing_prices.get((cab_label, oid), {})
+            # Таблица хранит уже рубли (int). Если где-то пусто — просто не отправим это поле.
+            to_push.append({
+                "offer_id": oid,
+                "old_price": p.get("old_price"),
+                "min_price": p.get("min_price"),
+                "price": p.get("your_price"),
+            })
+
+        try:
+            res = ozon_import_prices(client_id, api_key, to_push)
+            # Можно распечатать task_id/статус — зависит от ответа Ozon
+            print(f"{cab_label}: pushed prices for {len(existing_offer_ids)} items")
+        except Exception as e:
+            print(f"{cab_label}: FAILED to push prices: {e}")
 
     # prices list только для новых
     prices_map_new = fetch_ozon_prices_by_offer_ids(client_id, api_key, new_offer_ids)
@@ -417,6 +484,12 @@ def main() -> None:
 
     ms_token = os.getenv("MS_TOKEN", "").strip()
 
+    push_price = os.environ.get("PUSH_PRICE", "0").strip() in ("1", "true", "yes", "y")
+    existing_prices = read_existing_prices(sheet, WORKSHEET_NAME)
+
+    all_rows.extend(build_rows_for_cabinet("Cab1", cab1_id, cab1_key, ms_token, existing_prices, push_price))
+    all_rows.extend(build_rows_for_cabinet("Cab2", cab2_id, cab2_key, ms_token, existing_prices, push_price))
+ 
     if not spreadsheet_id:
         raise SystemExit("SPREADSHEET_ID is required (see config.example.env)")
     if not service_account_json:
