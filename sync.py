@@ -427,7 +427,7 @@ def build_rows_for_cabinet(
     existing_offer_ids = [oid for oid in offer_ids if (cab_label, oid) in existing_keys]
     new_offer_ids = [oid for oid in offer_ids if (cab_label, oid) not in existing_keys]
 
-        # PUSH в Ozon только для изменённых "старых"
+    # PUSH в Ozon только для изменённых "старых"
     if push_price and existing_offer_ids:
         # тянем текущие цены Ozon для сравнения (одним запросом)
         oz_existing = fetch_ozon_prices_by_offer_ids(client_id, api_key, existing_offer_ids)
