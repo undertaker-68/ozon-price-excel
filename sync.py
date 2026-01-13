@@ -162,30 +162,39 @@ def fetch_ozon_prices_by_offer_ids(client_id: str, api_key: str, offer_ids: List
 
 
 def fetch_ms_products_by_articles(ms_token: str, articles: List[str]) -> Dict[str, Dict[str, Any]]:
-    """Returns article -> MS product row.
-
-    MoySklad API doesn't support a simple IN filter by article, so we request per article.
-    For 186 products this is still manageable; we use a small delay to be polite.
+    """Returns article -> MS entity row (product/bundle/variant).
+    Priority: product > bundle > variant.
     """
     out: Dict[str, Dict[str, Any]] = {}
+
     for idx, art in enumerate(articles, start=1):
         params = {"filter": f"article={art}"}
-        data = ms_get(ms_token, "/entity/product", params=params)
-        # bundles
-        data_b = ms_get(ms_token, "/entity/bundle", params={"filter": f"article={article}"})
-        # variants
-        data_v = ms_get(ms_token, "/entity/variant", params={"filter": f"article={article}"})
 
+        # 1) product
+        data = ms_get(ms_token, "/entity/product", params=params)
         rows = data.get("rows", [])
         if rows:
             out[art] = rows[0]
-        # simple pacing
+        else:
+            # 2) bundle
+            data_b = ms_get(ms_token, "/entity/bundle", params=params)
+            rows_b = data_b.get("rows", [])
+            if rows_b:
+                out[art] = rows_b[0]
+            else:
+                # 3) variant
+                data_v = ms_get(ms_token, "/entity/variant", params=params)
+                rows_v = data_v.get("rows", [])
+                if rows_v:
+                    out[art] = rows_v[0]
+
+        # pacing
         if idx % 20 == 0:
             time.sleep(0.25)
         else:
             time.sleep(0.05)
-    return out
 
+    return out
 
 def money_from_ms(value: Optional[float]) -> Optional[float]:
     if value is None:
