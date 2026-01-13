@@ -499,6 +499,12 @@ def build_rows_for_cabinet(
         category_name = category_map.get(int(dcid), "") if isinstance(dcid, int) else ""
         type_name = type_map.get(int(tid), "") if isinstance(tid, int) else ""
 
+        sku = info.get("sku")
+        try:
+            sku = int(sku) if sku is not None else None
+        except Exception:
+            sku = None
+
         ms_name = ms.get("name", "") if isinstance(ms, dict) else ""
         buy_price = money_from_ms((ms.get("buyPrice") or {}).get("value") if isinstance(ms, dict) else None)
 
@@ -521,6 +527,7 @@ def build_rows_for_cabinet(
             "cab": cab_label,
             "category": category_name,
             "type": type_name,
+            "sku": sku,
             "ms_name": ms_name,
             "offer_id": oid,
             "buy_price": buy_price,
