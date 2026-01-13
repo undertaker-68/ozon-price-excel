@@ -262,13 +262,14 @@ def build_rows_for_cabinet(
         min_price = money_from_ozon(price.get("min_price"))
         your_price = money_from_ozon(price.get("marketing_seller_price"))
         buyer_price = money_from_ozon(price.get("price"))
+        offer_id_sheet = "'" + offer_id
 
         row = {
             "cab": cab_label,
             "category": category_name,
             "type": type_name,
             "ms_name": ms_name,
-            "offer_id": offer_id,
+            "offer_id": offer_id_sheet,
             "buy_price": buy_price,
             "old_price": old_price,
             "min_price": min_price,
