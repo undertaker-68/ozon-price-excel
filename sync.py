@@ -171,6 +171,11 @@ def fetch_ms_products_by_articles(ms_token: str, articles: List[str]) -> Dict[st
     for idx, art in enumerate(articles, start=1):
         params = {"filter": f"article={art}"}
         data = ms_get(ms_token, "/entity/product", params=params)
+        # bundles
+        data_b = ms_get(ms_token, "/entity/bundle", params={"filter": f"article={article}"})
+        # variants
+        data_v = ms_get(ms_token, "/entity/variant", params={"filter": f"article={article}"})
+
         rows = data.get("rows", [])
         if rows:
             out[art] = rows[0]
