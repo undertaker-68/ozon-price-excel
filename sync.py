@@ -64,6 +64,24 @@ def _cell_to_number(val: Any) -> Optional[float]:
     except ValueError:
         return None
 
+def _price_norm(x: Any) -> Optional[float]:
+    if x is None:
+        return None
+    try:
+        return float(x)
+    except Exception:
+        return None
+
+def _price_changed(a: Any, b: Any, eps: float = 0.01) -> bool:
+    """
+    True если цена отличается. eps=0.01 для рублёвых цен.
+    """
+    aa = _price_norm(a)
+    bb = _price_norm(b)
+    if aa is None or bb is None:
+        return False
+    return abs(aa - bb) > eps
+
 
 def money_from_ms(value: Optional[float]) -> Optional[float]:
     if value is None:
