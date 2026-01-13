@@ -239,15 +239,55 @@ def ozon_import_prices(client_id: str, api_key: str, items: List[Dict[str, Any]]
         if p is None and op is None and mp is None:
             continue
 
+        def _oz_price_str(x):
+    # Ozon хочет строки. В таблице могут быть 2937 или 2937.0
+    if x is None:
+        return None
+    v = float(x)
+    # если вдруг в таблице кто-то ввёл копейки - оставим 2 знака, иначе целое
+    if abs(v - round(v)) < 1e-9:
+        return str(int(round(v)))
+    return f"{v:.2f}".replace(",", ".")
+
+def ozon_import_prices(client_id: str, api_key: str, items: List[Dict[str, Any]]) -> Dict[str, Any]:
+    url = f"{OZON_BASE}/v1/product/import/prices"
+    headers = {
+        "Client-Id": client_id,
+        "Api-Key": api_key,
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+    }
+
+    payload = {"prices": []}
+    for it in items:
+        offer_id = normalize_offer_id(it.get("offer_id"))
+        if not offer_id:
+            continue
+
+        p  = _oz_price_str(it.get("price"))
+        op = _oz_price_str(it.get("old_price"))
+        mp = _oz_price_str(it.get("min_price"))
+
+        if p is None and op is None and mp is None:
+            continue
+
         row: Dict[str, Any] = {"offer_id": offer_id}
         if p is not None:
-            row["price"] = int(float(p))
+            row["price"] = p
         if op is not None:
-            row["old_price"] = int(float(op))
+            row["old_price"] = op
         if mp is not None:
-            row["min_price"] = int(float(mp))
+            row["min_price"] = mp
 
         payload["prices"].append(row)
+
+    if not payload["prices"]:
+        return {"skipped": True, "reason": "no prices to push"}
+
+    resp = requests.post(url, headers=headers, json=payload, timeout=60)
+    if resp.status_code != 200:
+        raise RuntimeError(f"Ozon import prices failed {resp.status_code}: {resp.text}")
+    return resp.json()
 
     if not payload["prices"]:
         return {"skipped": True, "reason": "no prices to push"}
