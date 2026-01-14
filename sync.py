@@ -668,12 +668,12 @@ def main() -> None:
     ]
 
     sheet_rows: List[List[Any]] = []
+    col_p_values: List[List[Any]] = []  # значения для колонки P
 
     for r in all_rows:
         offer_id_text = "'" + str(r.get("offer_id", "")).strip()
+       
         sheet_rows.append([
-            col_p_values.append([r.get("fbo_commission_percent", "")])
-         
             r.get("cab", ""),
             r.get("category", ""),
             r.get("type", ""),
@@ -689,7 +689,9 @@ def main() -> None:
             r.get("fbs_logistics", ""),
         ])
 
-        col_p_values: List[List[Any]] = []  # значения для колонки P
+         col_p_values.append([
+        r.get("fbo_commission_percent", "")
+    ])
 
     write_rows_to_sheet(ws, header, sheet_rows, col_p_values)
     print(f"Done. Written {len(sheet_rows)} rows to '{worksheet_name}'.")
