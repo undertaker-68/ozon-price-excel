@@ -400,8 +400,8 @@ def read_existing_sheet_prices(ws) -> Tuple[Set[Tuple[str, str]], Dict[Tuple[str
 
 def write_rows_to_sheet(ws, header: List[str], rows: List[List[Any]]) -> None:
     ws.clear()
-    ws.update([header] + rows, value_input_option="USER_ENTERED")
-
+    # первая строка — пустая (под твои заголовки)
+    ws.update([[""]] + [header] + rows, value_input_option="USER_ENTERED")
 
 # ---------- build rows ----------
 
@@ -605,6 +605,8 @@ def main() -> None:
         "Минимальная цена",
         "Ваша цена",
         "Цена для покупателя",
+        "Комиссия FBS",
+        "Логистика FBS",
     ]
 
     sheet_rows: List[List[Any]] = []
@@ -622,6 +624,8 @@ def main() -> None:
             r.get("min_price", ""),
             r.get("your_price", ""),
             r.get("buyer_price", ""),
+            "",
+            "",
         ])
 
     write_rows_to_sheet(ws, header, sheet_rows)
