@@ -22,7 +22,7 @@ J=10 buyer_price (Цена для покупателя)
 """
 
 import os
-import json, re, time
+import json, time
 from typing import Any, Dict, List, Optional, Tuple, Set
 
 import requests
@@ -35,66 +35,11 @@ OZON_BASE = "https://api-seller.ozon.ru"
 MS_BASE = "https://api.moysklad.ru/api/remap/1.2"
 MS_ACCEPT = "application/json;charset=utf-8"
 
-OZON_ENTRYPOINT = "https://www.ozon.ru/api/entrypoint-api.bx/page/json/v2"
-
 def _digits_price(s: Optional[str]) -> Optional[float]:
     if not s:
         return None
     digits = re.sub(r"[^\d]", "", str(s))
     return float(digits) if digits else None
-
-def fetch_web_prices_by_sku(sku: int, timeout: int = 20) -> Dict[str, Optional[float]]:
-    """
-    Пытаемся получить витринные цены по SKU (ID на сайте).
-    Возвращает:
-      - card_price: цена с Ozon картой (cardPrice)
-      - web_price: обычная цена без карты (price)
-      - web_old_price: старая/до скидки (originalPrice) если есть
-    """
-    # Важно: у Ozon “красивый” URL обычно со слагом, но /product/<id>/ часто тоже работает.
-    product_path = f"/product/{sku}/"
-
-    headers = {
-        "User-Agent": "Mozilla/5.0 (compatible; ozon-price-excel/1.0)",
-        "Accept": "application/json",
-        "Accept-Language": "ru-RU,ru;q=0.9,en;q=0.8",
-        "Referer": "https://www.ozon.ru" + product_path,
-    }
-
-    params = {"url": product_path}
-
-    for attempt in range(1, 5):
-        try:
-            r = requests.get(OZON_ENTRYPOINT, params=params, headers=headers, timeout=timeout)
-            r.raise_for_status()
-            data = r.json()
-            widget_states: Dict[str, str] = data.get("widgetStates") or {}
-
-            # Ищем любой webPrice-*
-            for k, v in widget_states.items():
-                if not k.startswith("webPrice-"):
-                    continue
-                try:
-                    obj = json.loads(v)  # второй парсинг
-                except Exception:
-                    continue
-
-                card = _digits_price(obj.get("cardPrice"))
-                webp = _digits_price(obj.get("price"))
-                oldp = _digits_price(obj.get("originalPrice"))
-
-                # если хотя бы что-то нашли — возвращаем
-                if card is not None or webp is not None or oldp is not None:
-                    return {"card_price": card, "web_price": webp, "web_old_price": oldp}
-
-            return {"card_price": None, "web_price": None, "web_old_price": None}
-
-        except Exception:
-            time.sleep(0.7 * attempt)
-
-    return {"card_price": None, "web_price": None, "web_old_price": None}
-
-# ---------- helpers ----------
 
 def chunk(lst: List[Any], size: int) -> List[List[Any]]:
     return [lst[i:i + size] for i in range(0, len(lst), size)]
@@ -492,7 +437,6 @@ def build_rows_for_cabinet(
     existing_keys: Set[Tuple[str, str]],
     existing_prices: Dict[Tuple[str, str], Dict[str, Optional[float]]],
     push_price: bool,
-    web_cache: Dict[int, Dict[str, Optional[float]]],   # <-- добавили
 ) -> List[Dict[str, Any]]:
 
     prod_items = fetch_ozon_product_list(client_id, api_key)
@@ -603,13 +547,6 @@ def build_rows_for_cabinet(
         # ====== ВАЖНО: "Цена для покупателя" = cardPrice (Ozon Card) ======
         buyer_price: Optional[float] = None
 
-        if sku is not None:
-            if sku not in web_cache:
-                web_cache[sku] = fetch_web_prices_by_sku(sku, timeout=20)
-                time.sleep(0.15)  # лёгкий антиспам, можно 0.1–0.3
-
-            buyer_price = web_cache[sku].get("card_price")
-
         # fallback: если витрина не отдала — пишем обычную цену из Seller API (чтоб не было пусто)
         if buyer_price is None:
             pall = prices_map_all.get(oid, {})
@@ -674,14 +611,6 @@ def main() -> None:
     existing_keys, existing_prices = read_existing_sheet_prices(ws)
 
     all_rows: List[Dict[str, Any]] = []
-
-    web_cache: Dict[int, Dict[str, Optional[float]]] = {}
-    print("Sync Cab1...")
-    all_rows.extend(build_rows_for_cabinet("Cab1", cab1_id, cab1_key, ms_token, existing_keys, existing_prices, push_price, web_cache))
-
-    if cab2_id and cab2_key:
-        print("Sync Cab2...")
-        all_rows.extend(build_rows_for_cabinet("Cab2", cab2_id, cab2_key, ms_token, existing_keys, existing_prices, push_price, web_cache))
 
     all_rows = sort_rows(all_rows)
 
