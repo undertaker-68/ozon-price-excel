@@ -100,6 +100,22 @@ def money_from_ozon(value: Any) -> Optional[float]:
     except Exception:
         return None
 
+def extract_fbs_commission(info: dict):
+    """
+    Возвращает (commission_percent, logistics_rub) для FBS
+    """
+    commissions = info.get("commissions") or []
+    for c in commissions:
+        if c.get("sale_schema") == "FBS":
+            percent = c.get("percent")
+            logistics = c.get("return_amount")  # 117.94 → 118
+            try:
+                logistics = round(float(logistics)) if logistics is not None else None
+            except Exception:
+                logistics = None
+            return percent, logistics
+    return None, None
+
 
 # ---------- HTTP wrappers ----------
 
@@ -497,6 +513,7 @@ def build_rows_for_cabinet(
         key = (cab_label, oid)
 
         info = info_map.get(oid, {})
+        fbs_commission_percent, fbs_logistics = extract_fbs_commission(info)
         ms = ms_map.get(oid, {})
 
         dcid = info.get("description_category_id")
@@ -541,6 +558,8 @@ def build_rows_for_cabinet(
             "min_price": min_price,
             "your_price": your_price,
             "buyer_price": buyer_price,
+            "fbs_commission_percent": fbs_commission_percent,
+            "fbs_logistics": fbs_logistics,
         })
 
     return rows
@@ -630,8 +649,8 @@ def main() -> None:
             r.get("min_price", ""),
             r.get("your_price", ""),
             r.get("buyer_price", ""),
-            "",
-            "",
+            r.get("fbs_commission_percent", ""),
+            r.get("fbs_logistics", ""),
         ])
 
     write_rows_to_sheet(ws, header, sheet_rows)
