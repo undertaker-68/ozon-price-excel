@@ -169,10 +169,31 @@ def ozon_post(client_id: str, api_key: str, path: str, payload: Dict[str, Any], 
         "Content-Type": "application/json",
         "Accept": "application/json",
     }
-    resp = requests.post(url, headers=headers, json=payload, timeout=timeout)
-    if resp.status_code >= 400:
+
+    attempts = 8
+    for attempt in range(1, attempts + 1):
+        try:
+            # timeout=(connect_timeout, read_timeout)
+            resp = requests.post(url, headers=headers, json=payload, timeout=(10, timeout))
+        except (requests.exceptions.ReadTimeout, requests.exceptions.ConnectTimeout, requests.exceptions.SSLError) as e:
+            sleep_s = min(60.0, 2.0 * attempt)
+            print(f"Ozon network timeout/ssl, sleep {sleep_s:.1f}s (attempt {attempt}/{attempts})")
+            time.sleep(sleep_s)
+            continue
+
+        if resp.status_code < 400:
+            return resp.json()
+
+        # 429 / 5xx — retry
+        if resp.status_code in (429, 500, 502, 503, 504):
+            sleep_s = min(60.0, 2.0 * attempt)
+            print(f"Ozon {resp.status_code}, sleep {sleep_s:.1f}s (attempt {attempt}/{attempts})")
+            time.sleep(sleep_s)
+            continue
+
         raise RuntimeError(f"Ozon {path} failed {resp.status_code}: {resp.text}")
-    return resp.json()
+
+    raise RuntimeError(f"Ozon {path} failed after {attempts} attempts")
 
 
 def ms_get(ms_token: str, path: str, params: Optional[Dict[str, Any]] = None, timeout: int = 60) -> Dict[str, Any]:
