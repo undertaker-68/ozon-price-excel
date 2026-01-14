@@ -107,7 +107,12 @@ def extract_fbs_commission(info: dict):
     commissions = info.get("commissions") or []
     for c in commissions:
         if c.get("sale_schema") == "FBS":
-            percent = c.get("percent")
+            percent_raw = c.get("percent")
+            try:
+                percent = float(percent_raw) / 100 if percent_raw is not None else None
+            except Exception:
+                percent = None
+
             logistics = c.get("return_amount")  # 117.94 → 118
             try:
                 logistics = round(float(logistics)) if logistics is not None else None
