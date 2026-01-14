@@ -433,27 +433,30 @@ def read_existing_sheet_prices(ws) -> Tuple[Set[Tuple[str, str]], Dict[Tuple[str
     return existing_keys, existing_prices
 
 
-def write_rows_to_sheet(ws, header: List[str], rows: List[List[Any]]) -> None:
+def write_rows_to_sheet(ws, header: List[str], rows_a_to_m: List[List[Any]], col_p_values: List[List[Any]]) -> None:
     """
-    Пишем данные, НЕ трогая N и O (там формулы пользователя).
-    1-я строка — пользовательские заголовки (не трогаем).
-    2-я строка — системный header (пишем).
-    3+ — данные (пишем).
+    A..M пишем массово.
+    N и O не трогаем.
+    P пишем отдельно.
     """
-    # чистим только A..M (13 колонок) со 2-й строки вниз
+    # очистить A..M со 2 строки вниз
     ws.batch_clear(["A2:M"])
-
-    # чистим отдельно P (16-я колонка) со 2-й строки вниз
+    # очистить P со 2 строки вниз
     ws.batch_clear(["P2:P"])
 
-    # пишем header+rows только в A..M и P (N/O не пишем вообще)
+    # A2: header (13 колонок) + data
     ws.update(
         range_name="A2",
-        values=[header] + rows,
+        values=[header] + rows_a_to_m,
         value_input_option="USER_ENTERED",
     )
 
-# ---------- build rows ----------
+    # P2: header для P и data
+    ws.update(
+        range_name="P2",
+        values=[["Комиссия FBO"]] + col_p_values,
+        value_input_option="USER_ENTERED",
+    )
 
 def build_rows_for_cabinet(
     cab_label: str,
@@ -683,7 +686,7 @@ def main() -> None:
             r.get("fbs_logistics", ""),
         ])
 
-    write_rows_to_sheet(ws, header, sheet_rows)
+    write_rows_to_sheet(ws, header, sheet_rows, col_p_values)
     print(f"Done. Written {len(sheet_rows)} rows to '{worksheet_name}'.")
 
 
