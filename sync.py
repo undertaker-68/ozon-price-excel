@@ -4,25 +4,32 @@
 """
 Manual sync: Ozon Seller API + MoySklad -> Google Sheets.
 
-Таблица:
-A=1 cab
-E=5 offer_id
-G=7 old_price   (Цена до скидок)
-H=8 min_price   (Минимальная цена)
-I=9 your_price  (Ваша цена)
-J=10 buyer_price (Цена для покупателя)
+Таблица (по твоему скрину, 11 колонок):
+1  Cabinet
+2  Категория товара нижнего уровня
+3  Тип товара
+4  SKU
+5  Название товара (МойСклад)
+6  offer_id
+7  Закупочная цена
+8  Цена до скидок (old_price)
+9  Минимальная цена (min_price)
+10 Ваша цена (your_price = marketing_seller_price)
+11 Цена для покупателя (buyer_price = price из Seller API)
 
 Логика:
 - old_price/min_price/your_price:
   * если товар уже есть в таблице (cab+offer_id) -> берем из таблицы
   * если товар новый -> тянем из Ozon (/v5/product/info/prices)
-- buyer_price всегда тянем из Ozon
-- PUSH_PRICE=1 -> для "старых" товаров пушим цены из таблицы в Ozon (/v1/product/import/prices)
+- buyer_price всегда тянем из Ozon (/v5/product/info/prices -> price)
+- PUSH_PRICE=1 -> для "старых" товаров пушим ТОЛЬКО ИЗМЕНЁННЫЕ цены из таблицы в Ozon (/v1/product/import/prices)
 - offer_id нормализуем (цифры <5 -> zfill(5)), в Sheets пишем как текст (с апострофом)
 """
 
 import os
-import json, time
+import re
+import json
+import time
 from typing import Any, Dict, List, Optional, Tuple, Set
 
 import requests
@@ -35,11 +42,6 @@ OZON_BASE = "https://api-seller.ozon.ru"
 MS_BASE = "https://api.moysklad.ru/api/remap/1.2"
 MS_ACCEPT = "application/json;charset=utf-8"
 
-def _digits_price(s: Optional[str]) -> Optional[float]:
-    if not s:
-        return None
-    digits = re.sub(r"[^\d]", "", str(s))
-    return float(digits) if digits else None
 
 def chunk(lst: List[Any], size: int) -> List[List[Any]]:
     return [lst[i:i + size] for i in range(0, len(lst), size)]
@@ -67,6 +69,7 @@ def _cell_to_number(val: Any) -> Optional[float]:
     except ValueError:
         return None
 
+
 def _price_norm(x: Any) -> Optional[float]:
     if x is None:
         return None
@@ -75,10 +78,8 @@ def _price_norm(x: Any) -> Optional[float]:
     except Exception:
         return None
 
+
 def _price_changed(a: Any, b: Any, eps: float = 0.01) -> bool:
-    """
-    True если цена отличается. eps=0.01 для рублёвых цен.
-    """
     aa = _price_norm(a)
     bb = _price_norm(b)
     if aa is None or bb is None:
@@ -120,7 +121,7 @@ def ozon_post(client_id: str, api_key: str, path: str, payload: Dict[str, Any], 
         try:
             # timeout=(connect_timeout, read_timeout)
             resp = requests.post(url, headers=headers, json=payload, timeout=(10, timeout))
-        except (requests.exceptions.ReadTimeout, requests.exceptions.ConnectTimeout, requests.exceptions.SSLError) as e:
+        except (requests.exceptions.ReadTimeout, requests.exceptions.ConnectTimeout, requests.exceptions.SSLError):
             sleep_s = min(60.0, 2.0 * attempt)
             print(f"Ozon network timeout/ssl, sleep {sleep_s:.1f}s (attempt {attempt}/{attempts})")
             time.sleep(sleep_s)
@@ -129,7 +130,6 @@ def ozon_post(client_id: str, api_key: str, path: str, payload: Dict[str, Any], 
         if resp.status_code < 400:
             return resp.json()
 
-        # 429 / 5xx — retry
         if resp.status_code in (429, 500, 502, 503, 504):
             sleep_s = min(60.0, 2.0 * attempt)
             print(f"Ozon {resp.status_code}, sleep {sleep_s:.1f}s (attempt {attempt}/{attempts})")
@@ -195,12 +195,13 @@ def ms_list_all(ms_token: str, path: str, *, limit: int = 1000, filters: Optiona
         if filters:
             params["filter"] = filters
         data = ms_get(ms_token, path, params=params)
-        chunk = data.get("rows") or []
-        rows.extend(chunk)
-        if len(chunk) < limit:
+        part = data.get("rows") or []
+        rows.extend(part)
+        if len(part) < limit:
             break
         offset += limit
     return rows
+
 
 def ms_load_catalog_cache(cache_path: str, ttl_sec: int) -> Optional[Dict[str, Dict[str, Any]]]:
     try:
@@ -212,10 +213,12 @@ def ms_load_catalog_cache(cache_path: str, ttl_sec: int) -> Optional[Dict[str, D
     except Exception:
         return None
 
+
 def ms_save_catalog_cache(cache_path: str, data: Dict[str, Dict[str, Any]]) -> None:
     os.makedirs(os.path.dirname(cache_path), exist_ok=True)
     with open(cache_path, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False)
+
 
 def fetch_ozon_tree_maps(client_id: str, api_key: str) -> Tuple[Dict[int, str], Dict[int, str]]:
     data = ozon_post(client_id, api_key, "/v1/description-category/tree", {"language": "RU"})
@@ -290,14 +293,11 @@ def fetch_ozon_prices_by_offer_ids(client_id: str, api_key: str, offer_ids: List
 
 
 def _oz_price_str(x: Any) -> Optional[str]:
-    # Ozon хочет строки. В таблице могут быть 2937 или 2937.0
     if x is None:
         return None
     v = float(x)
-    # если целое — отправляем без .0
     if abs(v - round(v)) < 1e-9:
         return str(int(round(v)))
-    # иначе 2 знака после запятой
     return f"{v:.2f}".replace(",", ".")
 
 
@@ -342,20 +342,17 @@ def ozon_import_prices(client_id: str, api_key: str, items: List[Dict[str, Any]]
         raise RuntimeError(f"Ozon import prices failed {resp.status_code}: {resp.text}")
     return resp.json()
 
+
 # ---------- MoySklad fetchers ----------
 
 def fetch_ms_products_by_articles(ms_token: str, offer_ids: List[str]) -> Dict[str, Dict[str, Any]]:
-    # параметры кеша
     cache_path = os.environ.get("MS_CACHE_PATH", "/root/google_ozon_prices/.cache/ms_catalog.json")
-    ttl_sec = int(os.environ.get("MS_CACHE_TTL_SECONDS", "900"))  # 15 минут
+    ttl_sec = int(os.environ.get("MS_CACHE_TTL_SECONDS", "900"))
 
     cached = ms_load_catalog_cache(cache_path, ttl_sec)
     if cached is not None:
-        # cached = { "00022": {...}, ... }
         return {oid: cached.get(oid, {}) for oid in offer_ids}
 
-    # 1) забираем все products и bundles (можно ограничить archived=false)
-    # если хочешь включать архив: убери filters
     filters = "archived=false"
     products = ms_list_all(ms_token, "/entity/product", filters=filters)
     bundles  = ms_list_all(ms_token, "/entity/bundle",  filters=filters)
@@ -373,8 +370,8 @@ def fetch_ms_products_by_articles(ms_token: str, offer_ids: List[str]) -> Dict[s
             catalog[str(art)] = it
 
     ms_save_catalog_cache(cache_path, catalog)
-
     return {oid: catalog.get(oid, {}) for oid in offer_ids}
+
 
 # ---------- Google Sheets ----------
 
@@ -386,16 +383,16 @@ def connect_sheet(service_account_json: str, spreadsheet_id: str, worksheet_name
     try:
         ws = sh.worksheet(worksheet_name)
     except gspread.WorksheetNotFound:
-        ws = sh.add_worksheet(title=worksheet_name, rows=2000, cols=20)
+        ws = sh.add_worksheet(title=worksheet_name, rows=2000, cols=30)
     return ws
 
 
 def read_existing_sheet_prices(ws) -> Tuple[Set[Tuple[str, str]], Dict[Tuple[str, str], Dict[str, Optional[float]]]]:
     CAB_COL = 1
-    OFFER_COL = 5
-    OLD_COL = 7
-    MIN_COL = 8
-    YOUR_COL = 9
+    OFFER_COL = 6
+    OLD_COL = 8
+    MIN_COL = 9
+    YOUR_COL = 10
 
     values = ws.get_all_values()
     existing_keys: Set[Tuple[str, str]] = set()
@@ -460,7 +457,6 @@ def build_rows_for_cabinet(
 
         for oid in existing_offer_ids:
             sheet_p = existing_prices.get((cab_label, oid), {}) or {}
-
             sheet_old  = sheet_p.get("old_price")
             sheet_min  = sheet_p.get("min_price")
             sheet_your = sheet_p.get("your_price")
@@ -498,12 +494,10 @@ def build_rows_for_cabinet(
         else:
             print(f"{cab_label}: no price changes to push (of {len(existing_offer_ids)})")
 
-    # цены тянем из Ozon только для новых (это твои 3 поля old/min/your)
+    # цены тянем из Ozon только для новых (old/min/your)
     prices_map_new = fetch_ozon_prices_by_offer_ids(client_id, api_key, new_offer_ids)
 
-    # buyer_price (колонка K) теперь будем брать с витрины по SKU,
-    # поэтому seller "prices_map_all" больше не обязателен.
-    # Оставим как fallback, если витрина не отдала.
+    # buyer_price тянем для всех
     prices_map_all = fetch_ozon_prices_by_offer_ids(client_id, api_key, offer_ids)
 
     category_map, type_map = fetch_ozon_tree_maps(client_id, api_key)
@@ -526,14 +520,14 @@ def build_rows_for_cabinet(
         # SKU
         sku = info.get("sku")
         try:
-            sku = int(sku) if sku is not None else None
+            sku = int(sku) if sku is not None else ""
         except Exception:
-            sku = None
+            sku = ""
 
         ms_name = ms.get("name", "") if isinstance(ms, dict) else ""
         buy_price = money_from_ms((ms.get("buyPrice") or {}).get("value") if isinstance(ms, dict) else None)
 
-        # 3 поля цен (G/H/I/J у тебя по смыслу): old/min/your
+        # 3 поля цен (old/min/your)
         if key in existing_prices:
             old_price = existing_prices[key].get("old_price")
             min_price = existing_prices[key].get("min_price")
@@ -544,13 +538,8 @@ def build_rows_for_cabinet(
             min_price = money_from_ozon(pnew.get("min_price"))
             your_price = money_from_ozon(pnew.get("marketing_seller_price"))
 
-        # ====== ВАЖНО: "Цена для покупателя" = cardPrice (Ozon Card) ======
-        buyer_price: Optional[float] = None
-
-        # fallback: если витрина не отдала — пишем обычную цену из Seller API (чтоб не было пусто)
-        if buyer_price is None:
-            pall = prices_map_all.get(oid, {})
-            buyer_price = money_from_ozon(pall.get("price"))
+        pall = prices_map_all.get(oid, {})
+        buyer_price = money_from_ozon(pall.get("price"))
 
         rows.append({
             "cab": cab_label,
@@ -563,10 +552,11 @@ def build_rows_for_cabinet(
             "old_price": old_price,
             "min_price": min_price,
             "your_price": your_price,
-            "buyer_price": buyer_price,   # <-- сюда теперь попадёт cardPrice
+            "buyer_price": buyer_price,
         })
 
     return rows
+
 
 def sort_rows(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     def norm(s: Any) -> str:
@@ -597,9 +587,9 @@ def main() -> None:
     push_price = os.getenv("PUSH_PRICE", "0").strip().lower() in ("1", "true", "yes", "y")
 
     if not spreadsheet_id:
-        raise SystemExit("SPREADSHEET_ID is required (see config.example.env)")
+        raise SystemExit("SPREADSHEET_ID is required")
     if not service_account_json:
-        raise SystemExit("GOOGLE_SERVICE_ACCOUNT_JSON is required (see config.example.env)")
+        raise SystemExit("GOOGLE_SERVICE_ACCOUNT_JSON is required")
     if not os.path.exists(service_account_json):
         raise SystemExit(f"Service account JSON not found: {service_account_json}")
     if not ms_token:
@@ -611,6 +601,13 @@ def main() -> None:
     existing_keys, existing_prices = read_existing_sheet_prices(ws)
 
     all_rows: List[Dict[str, Any]] = []
+
+    print("Sync Cab1...")
+    all_rows.extend(build_rows_for_cabinet("Cab1", cab1_id, cab1_key, ms_token, existing_keys, existing_prices, push_price))
+
+    if cab2_id and cab2_key:
+        print("Sync Cab2...")
+        all_rows.extend(build_rows_for_cabinet("Cab2", cab2_id, cab2_key, ms_token, existing_keys, existing_prices, push_price))
 
     all_rows = sort_rows(all_rows)
 
