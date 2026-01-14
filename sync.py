@@ -471,6 +471,7 @@ def build_rows_for_cabinet(
     existing_keys: Set[Tuple[str, str]],
     existing_prices: Dict[Tuple[str, str], Dict[str, Optional[float]]],
     push_price: bool,
+    web_cache: Dict[int, Dict[str, Optional[float]]],   # <-- добавили
 ) -> List[Dict[str, Any]]:
 
     prod_items = fetch_ozon_product_list(client_id, api_key)
@@ -487,7 +488,6 @@ def build_rows_for_cabinet(
 
     # PUSH в Ozon только для изменённых "старых"
     if push_price and existing_offer_ids:
-        # тянем текущие цены Ozon для сравнения (одним запросом)
         oz_existing = fetch_ozon_prices_by_offer_ids(client_id, api_key, existing_offer_ids)
 
         to_push: List[Dict[str, Any]] = []
@@ -508,7 +508,6 @@ def build_rows_for_cabinet(
             row: Dict[str, Any] = {"offer_id": oid}
             any_change = False
 
-            # отправляем только непустое и только если отличается
             if sheet_old is not None and _price_changed(sheet_old, oz_old):
                 row["old_price"] = sheet_old
                 any_change = True
@@ -534,10 +533,12 @@ def build_rows_for_cabinet(
         else:
             print(f"{cab_label}: no price changes to push (of {len(existing_offer_ids)})")
 
-    # цены тянем из Ozon только для новых
+    # цены тянем из Ozon только для новых (это твои 3 поля old/min/your)
     prices_map_new = fetch_ozon_prices_by_offer_ids(client_id, api_key, new_offer_ids)
 
-    # buyer_price тянем для всех
+    # buyer_price (колонка K) теперь будем брать с витрины по SKU,
+    # поэтому seller "prices_map_all" больше не обязателен.
+    # Оставим как fallback, если витрина не отдала.
     prices_map_all = fetch_ozon_prices_by_offer_ids(client_id, api_key, offer_ids)
 
     category_map, type_map = fetch_ozon_tree_maps(client_id, api_key)
@@ -557,6 +558,7 @@ def build_rows_for_cabinet(
         category_name = category_map.get(int(dcid), "") if isinstance(dcid, int) else ""
         type_name = type_map.get(int(tid), "") if isinstance(tid, int) else ""
 
+        # SKU
         sku = info.get("sku")
         try:
             sku = int(sku) if sku is not None else None
@@ -566,7 +568,7 @@ def build_rows_for_cabinet(
         ms_name = ms.get("name", "") if isinstance(ms, dict) else ""
         buy_price = money_from_ms((ms.get("buyPrice") or {}).get("value") if isinstance(ms, dict) else None)
 
-        # 3 поля цен
+        # 3 поля цен (G/H/I/J у тебя по смыслу): old/min/your
         if key in existing_prices:
             old_price = existing_prices[key].get("old_price")
             min_price = existing_prices[key].get("min_price")
@@ -577,9 +579,20 @@ def build_rows_for_cabinet(
             min_price = money_from_ozon(pnew.get("min_price"))
             your_price = money_from_ozon(pnew.get("marketing_seller_price"))
 
-        # buyer_price всегда актуальная
-        pall = prices_map_all.get(oid, {})
-        buyer_price = money_from_ozon(pall.get("price"))
+        # ====== ВАЖНО: "Цена для покупателя" = cardPrice (Ozon Card) ======
+        buyer_price: Optional[float] = None
+
+        if sku is not None:
+            if sku not in web_cache:
+                web_cache[sku] = fetch_web_prices_by_sku(sku, timeout=20)
+                time.sleep(0.15)  # лёгкий антиспам, можно 0.1–0.3
+
+            buyer_price = web_cache[sku].get("card_price")
+
+        # fallback: если витрина не отдала — пишем обычную цену из Seller API (чтоб не было пусто)
+        if buyer_price is None:
+            pall = prices_map_all.get(oid, {})
+            buyer_price = money_from_ozon(pall.get("price"))
 
         rows.append({
             "cab": cab_label,
@@ -592,11 +605,10 @@ def build_rows_for_cabinet(
             "old_price": old_price,
             "min_price": min_price,
             "your_price": your_price,
-            "buyer_price": buyer_price,
+            "buyer_price": buyer_price,   # <-- сюда теперь попадёт cardPrice
         })
 
     return rows
-
 
 def sort_rows(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     def norm(s: Any) -> str:
@@ -642,12 +654,13 @@ def main() -> None:
 
     all_rows: List[Dict[str, Any]] = []
 
+    web_cache: Dict[int, Dict[str, Optional[float]]] = {}
     print("Sync Cab1...")
-    all_rows.extend(build_rows_for_cabinet("Cab1", cab1_id, cab1_key, ms_token, existing_keys, existing_prices, push_price))
+    all_rows.extend(build_rows_for_cabinet("Cab1", cab1_id, cab1_key, ms_token, existing_keys, existing_prices, push_price, web_cache))
 
     if cab2_id and cab2_key:
         print("Sync Cab2...")
-        all_rows.extend(build_rows_for_cabinet("Cab2", cab2_id, cab2_key, ms_token, existing_keys, existing_prices, push_price))
+        all_rows.extend(build_rows_for_cabinet("Cab2", cab2_id, cab2_key, ms_token, existing_keys, existing_prices, push_price, web_cache))
 
     all_rows = sort_rows(all_rows)
 
