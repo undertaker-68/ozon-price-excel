@@ -399,9 +399,11 @@ def read_existing_sheet_prices(ws) -> Tuple[Set[Tuple[str, str]], Dict[Tuple[str
 
 
 def write_rows_to_sheet(ws, header: List[str], rows: List[List[Any]]) -> None:
-    ws.clear()
-    # первая строка — пустая (под твои заголовки)
-    ws.update([[""]] + [header] + rows, value_input_option="USER_ENTERED")
+    # очищаем всё, кроме 1-й строки (оставляем под твои заголовки)
+    ws.batch_clear(["A2:Z"])
+
+    # пишем системный header во 2-ю строку и данные с 3-й
+    ws.update("A2", [header] + rows, value_input_option="USER_ENTERED")
 
 # ---------- build rows ----------
 
