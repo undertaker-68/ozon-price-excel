@@ -689,8 +689,8 @@ def main() -> None:
             r.get("fbs_logistics", ""),
         ])
 
-         col_p_values.append([
-        r.get("fbo_commission_percent", "")
+        col_p_values.append([
+            r.get("fbo_commission_percent", "")
     ])
 
     write_rows_to_sheet(ws, header, sheet_rows, col_p_values)
