@@ -121,6 +121,20 @@ def extract_fbs_commission(info: dict):
             return percent, logistics
     return None, None
 
+def extract_fbo_commission_percent(info: dict) -> Optional[float]:
+    """
+    Возвращает комиссию FBO в виде 0.xx (для формата % в Sheets).
+    """
+    commissions = info.get("commissions") or []
+    for c in commissions:
+        if c.get("sale_schema") == "FBO":
+            percent_raw = c.get("percent")
+            try:
+                return float(percent_raw) / 100 if percent_raw is not None else None
+            except Exception:
+                return None
+    return None
+
 
 # ---------- HTTP wrappers ----------
 
@@ -420,15 +434,24 @@ def read_existing_sheet_prices(ws) -> Tuple[Set[Tuple[str, str]], Dict[Tuple[str
 
 
 def write_rows_to_sheet(ws, header: List[str], rows: List[List[Any]]) -> None:
-    # очищаем всё, кроме 1-й строки (оставляем под твои заголовки)
-    ws.batch_clear(["A2:Z"])
+    """
+    Пишем данные, НЕ трогая N и O (там формулы пользователя).
+    1-я строка — пользовательские заголовки (не трогаем).
+    2-я строка — системный header (пишем).
+    3+ — данные (пишем).
+    """
+    # чистим только A..M (13 колонок) со 2-й строки вниз
+    ws.batch_clear(["A2:M"])
 
-    # пишем системный header во 2-ю строку и данные с 3-й
+    # чистим отдельно P (16-я колонка) со 2-й строки вниз
+    ws.batch_clear(["P2:P"])
+
+    # пишем header+rows только в A..M и P (N/O не пишем вообще)
     ws.update(
-    range_name="A2",
-    values=[header] + rows,
-    value_input_option="USER_ENTERED",
-)
+        range_name="A2",
+        values=[header] + rows,
+        value_input_option="USER_ENTERED",
+    )
 
 # ---------- build rows ----------
 
@@ -519,6 +542,7 @@ def build_rows_for_cabinet(
 
         info = info_map.get(oid, {})
         fbs_commission_percent, fbs_logistics = extract_fbs_commission(info)
+        fbo_commission_percent = extract_fbo_commission_percent(info)
         ms = ms_map.get(oid, {})
 
         dcid = info.get("description_category_id")
@@ -565,6 +589,7 @@ def build_rows_for_cabinet(
             "buyer_price": buyer_price,
             "fbs_commission_percent": fbs_commission_percent,
             "fbs_logistics": fbs_logistics,
+            "fbo_commission_percent": fbo_commission_percent,
         })
 
     return rows
