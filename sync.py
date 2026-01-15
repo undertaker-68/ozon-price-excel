@@ -404,6 +404,44 @@ def ozon_import_prices(client_id: str, api_key: str, items: List[Dict[str, Any]]
     if resp.status_code != 200:
         raise RuntimeError(f"Ozon import prices failed {resp.status_code}: {resp.text}")
     return resp.json()
+ 
+
+def fetch_ozon_stocks_by_offer_ids(client_id: str, api_key: str, offer_ids: List[str]) -> Dict[str, int]:
+    """
+    /v4/product/info/stocks
+    Возвращает суммарный остаток (present) по FBS+FBO для каждого offer_id.
+    """
+    out: Dict[str, int] = {}
+    if not offer_ids:
+        return out
+
+    for batch in chunk(offer_ids, 1000):
+        payload = {"filter": {"offer_id": batch}, "limit": 1000}
+        res = ozon_post(client_id, api_key, "/v4/product/info/stocks", payload)
+
+        items = (res.get("result") or {}).get("items") or []
+        for it in items:
+            oid = normalize_offer_id(it.get("offer_id"))
+            if not oid:
+                continue
+
+            total = 0
+            stocks = it.get("stocks") or []
+            # ожидаем список объектов вида {"type":"fbs"/"fbo", "present":...}
+            for s in stocks:
+                if not isinstance(s, dict):
+                    continue
+                stype = str(s.get("type") or "").lower()
+                if stype not in ("fbs", "fbo"):
+                    continue
+                try:
+                    total += int(float(s.get("present") or 0))
+                except Exception:
+                    pass
+
+            out[oid] = total
+
+    return out
 
 
 # ---------- MoySklad: bundles buy price from components ----------
@@ -523,9 +561,9 @@ def read_existing_sheet_prices(ws) -> Tuple[Set[Tuple[str, str]], Dict[Tuple[str
     # ВАЖНО: номера колонок соответствуют реальному header (см. docstring сверху)
     CAB_COL = 1         # A
     OFFER_COL = 6       # F
-    OLD_COL = 8         # H
-    MIN_COL = 9         # I
-    YOUR_COL = 10       # J
+    OLD_COL = 9         # H
+    MIN_COL = 10         # I
+    YOUR_COL = 11       # J
 
     values = ws.get_all_values()
     existing_keys: Set[Tuple[str, str]] = set()
@@ -567,7 +605,7 @@ def write_rows_to_sheet(
     P и Q пишем отдельно.
     R/S/T/U/V не трогаем.
     """
-    ws.batch_clear(["A2:M"])
+    ws.batch_clear(["A2:N"])
     ws.batch_clear(["P2:P"])
     ws.batch_clear(["Q2:Q"])
 
@@ -661,6 +699,8 @@ def build_rows_for_cabinet(
 
     prices_map_new = fetch_ozon_prices_by_offer_ids(client_id, api_key, new_offer_ids)
     prices_map_all = fetch_ozon_prices_by_offer_ids(client_id, api_key, offer_ids)
+    stocks_map = fetch_ozon_stocks_by_offer_ids(client_id, api_key, offer_ids)
+
 
     category_map, type_map = fetch_ozon_tree_maps(client_id, api_key)
     ms_map = fetch_ms_products_by_articles(ms_token, offer_ids)
@@ -674,6 +714,8 @@ def build_rows_for_cabinet(
         fbs_commission_percent, fbs_logistics = extract_fbs_commission(info)
         fbo_commission_percent = extract_fbo_commission_percent(info)
         fbo_base_logistics = extract_fbo_base_logistics(info)
+
+        stock_total = stocks_map.get(oid, 0)
 
         ms = ms_map.get(oid, {})
 
@@ -720,6 +762,7 @@ def build_rows_for_cabinet(
             "sku": sku,
             "ms_name": ms_name,
             "offer_id": oid,
+            "stock": stock_total,
             "buy_price": buy_price,
             "old_price": old_price,
             "min_price": min_price,
@@ -729,6 +772,7 @@ def build_rows_for_cabinet(
             "fbs_logistics": fbs_logistics,
             "fbo_commission_percent": fbo_commission_percent,
             "fbo_base_logistics": fbo_base_logistics,
+         
         })
 
     return rows
@@ -794,6 +838,7 @@ def main() -> None:
         "SKU",
         "Название товара (МойСклад)",
         "offer_id",
+        "Остаток",
         "Закупочная цена",
         "Цена до скидок",
         "Минимальная цена",
@@ -817,6 +862,7 @@ def main() -> None:
             r.get("sku", ""),
             r.get("ms_name", ""),
             offer_id_text,
+            r.get("stock", 0),
             r.get("buy_price", ""),
             r.get("old_price", ""),
             r.get("min_price", ""),
