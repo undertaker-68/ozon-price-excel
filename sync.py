@@ -719,8 +719,13 @@ def main() -> None:
         r.get("fbs_logistics", ""),
     ])
 
-    col_p_values.append([r.get("fbo_commission_percent", "")])
-    col_q_values.append([r.get("fbo_base_logistics", "")])
+    col_p_values.append([
+        r.get("fbo_commission_percent", "")
+    ])
+
+    col_q_values.append([
+        r.get("fbo_base_logistics", "")
+    ])
 
 write_rows_to_sheet(ws, header, sheet_rows, col_p_values, col_q_values)
 print(f"Done. Written {len(sheet_rows)} rows to '{worksheet_name}'.")
