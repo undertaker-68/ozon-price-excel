@@ -88,30 +88,35 @@ def main():
     # Попробуем распарсить JSON
     try:
         j = json.loads(text)
-    except Exception:
-        raise SystemExit("Ответ не JSON (см. last_delivery.json)")
+       # Найдём ВСЕ точки, где есть date + tariff/averageDeliveryTime
+    points = []
 
-    # Если это ошибка — покажем и выходим
-    if isinstance(j, dict) and "error" in j:
-        raise SystemExit(f"API error: {j['error']}")
+    def walk(o):
+        if isinstance(o, dict):
+            if "date" in o and (("tariff" in o) or ("averageDeliveryTime" in o)):
+                points.append(o)
+            for v in o.values():
+                walk(v)
+        elif isinstance(o, list):
+            for it in o:
+                walk(it)
 
-    # Ищем объект, где есть tariff/averageDeliveryTime
-    node = deep_find_first(j, {"tariff", "averageDeliveryTime", "averageDeliveryTimeHours", "tariffValue", "fee"})
-    if node is None:
-        raise SystemExit("JSON получен, но не нашёл узел с tariff/averageDeliveryTime. См. last_delivery.json")
+    walk(j)
 
-    # Пытаемся вытащить значения из разных вариантов структуры
-    tariff = node.get("tariff") if isinstance(node, dict) else None
-    if isinstance(tariff, dict):
-        tariff_value = tariff.get("tariffValue")
-        fee = tariff.get("fee")
-    else:
-        tariff_value = node.get("tariffValue")
-        fee = node.get("fee")
+    if not points:
+        raise SystemExit("JSON получен, но не нашёл точки с date+tariff/averageDeliveryTime. См. last_delivery.json")
 
-    avg = node.get("averageDeliveryTime") or node.get("averageDeliveryTimeHours") or node.get("avgDeliveryTime")
+    # Берём самую свежую по строке даты YYYY-MM-DD
+    points.sort(key=lambda x: x.get("date", ""))
+    last = points[-1]
+
+    tariff = last.get("tariff") or {}
+    tariff_value = tariff.get("tariffValue")
+    fee = tariff.get("fee")
+    avg = last.get("averageDeliveryTime")
 
     print("OK")
+    print("date:", last.get("date"))
     print("averageDeliveryTime:", avg)
     print("tariffValue:", tariff_value)
     print("fee:", fee)
