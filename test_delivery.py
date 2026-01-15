@@ -86,10 +86,11 @@ def main():
     print("HTTP:", status)
 
     # Попробуем распарсить JSON
-    try:
-        j = json.loads(text)
-       # Найдём ВСЕ точки, где есть date + tariff/averageDeliveryTime
+    j = json.loads(text)
+
+    # Найдём ВСЕ точки, где есть date + tariff/averageDeliveryTime
     points = []
+
 
     def walk(o):
         if isinstance(o, dict):
