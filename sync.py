@@ -334,70 +334,49 @@ def fetch_ozon_prices_by_offer_ids(client_id: str, api_key: str, offer_ids: List
 def fetch_ozon_stocks_by_offer_ids(client_id: str, api_key: str, offer_ids: List[str]) -> Dict[str, int]:
     """
     /v4/product/info/stocks
-    Возвращаем суммарный остаток по FBS+FBO.
-    Если по типам fbs/fbo ничего не нашлось — суммируем все записи как fallback,
-    чтобы не получать вечные нули из-за неожиданного stype.
-    Один пример ответа сохраняем в /tmp/ozon_stocks_sample.json.
+    В реальности API может возвращать items либо на верхнем уровне, либо в result.items.
+    Суммируем present по типам fbs + fbo.
     """
     out: Dict[str, int] = {}
     if not offer_ids:
         return out
 
-    dumped = False
-
     for batch in chunk(offer_ids, 1000):
         payload = {"filter": {"offer_id": batch}, "limit": 1000}
         res = ozon_post(client_id, api_key, "/v4/product/info/stocks", payload)
 
-        items = (res.get("result") or {}).get("items") or []
-        if items and not dumped:
-            try:
-                with open("/tmp/ozon_stocks_sample.json", "w", encoding="utf-8") as f:
-                    json.dump(items[0], f, ensure_ascii=False, indent=2)
-                print("DEBUG: saved /tmp/ozon_stocks_sample.json (first item from /v4/product/info/stocks)")
-            except Exception:
-                pass
-            dumped = True
+        # ВАЖНО: поддерживаем оба формата ответа
+        items = (res.get("result") or {}).get("items") or res.get("items") or []
+        if not isinstance(items, list):
+            items = []
 
         for it in items:
             oid = normalize_offer_id(it.get("offer_id"))
             if not oid:
                 continue
 
+            total = 0
             stocks = it.get("stocks") or []
             if not isinstance(stocks, list):
                 out[oid] = 0
                 continue
 
-            def get_qty(s: Dict[str, Any]) -> int:
-                v = s.get("present")
-                if v is None:
-                    v = s.get("free_to_sell")
-                if v is None:
-                    v = s.get("available")
-                if v is None:
-                    v = 0
-                try:
-                    return int(float(v))
-                except Exception:
-                    return 0
-
-            total_fbsfbo = 0
-            total_all = 0
-
             for s in stocks:
                 if not isinstance(s, dict):
                     continue
-                qty = get_qty(s)
-                total_all += qty
                 stype = str(s.get("type") or "").lower()
-                if stype in ("fbs", "fbo"):
-                    total_fbsfbo += qty
+                if stype not in ("fbs", "fbo"):
+                    continue
 
-            out[oid] = total_fbsfbo if total_fbsfbo != 0 else total_all
+                v = s.get("present")
+                try:
+                    total += int(float(v or 0))
+                except Exception:
+                    pass
+
+            out[oid] = total
 
     return out
-
 
 def _oz_price_str(x: Any) -> Optional[str]:
     if x is None:
