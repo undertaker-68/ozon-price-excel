@@ -5,8 +5,9 @@ from playwright.sync_api import sync_playwright
 PROJECT = Path(__file__).resolve().parent
 COOKIES_TXT = PROJECT / "cookies.txt"
 
-TARGET_PAGE = "https://seller.ozon.ru/app/analytics/sales-geography/local-packaging?__rr=3"
-API_URL = "/api/site/seller-analytics/average-delivery-time/dynamic-chart?__rr=3"
+COMPANY_ID = "151812"
+API_PATH = "/api/site/seller-analytics/average-delivery-time/dynamic-chart"
+API_URL = f"https://seller.ozon.ru{API_PATH}?__rr=3"
 
 def parse_netscape_cookies(txt: str):
     cookies = []
@@ -28,6 +29,22 @@ def parse_netscape_cookies(txt: str):
         })
     return cookies
 
+def deep_find_first(obj, want_keys):
+    """Возвращает первый dict, который содержит хотя бы один ключ из want_keys."""
+    if isinstance(obj, dict):
+        if any(k in obj for k in want_keys):
+            return obj
+        for v in obj.values():
+            r = deep_find_first(v, want_keys)
+            if r is not None:
+                return r
+    elif isinstance(obj, list):
+        for it in obj:
+            r = deep_find_first(it, want_keys)
+            if r is not None:
+                return r
+    return None
+
 def main():
     if not COOKIES_TXT.exists():
         raise SystemExit(f"Нет cookies файла: {COOKIES_TXT}")
@@ -36,90 +53,68 @@ def main():
         COOKIES_TXT.read_text(encoding="utf-8", errors="ignore")
     )
 
-    captured = {"ok": False, "json": None, "status": None}
-
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
-        context = browser.new_context(locale="ru-RU")
-
+        context = browser.new_context(
+            locale="ru-RU",
+            extra_http_headers={
+                "accept": "application/json, text/plain, */*",
+                "x-o3-app-name": "seller-ui",
+                "x-o3-language": "ru",
+                "x-o3-company-id": COMPANY_ID,
+                "x-o3-page-type": "analytics_metrics",
+                "referer": "https://seller.ozon.ru/app/analytics/sales-geography/local-packaging?__rr=3",
+            },
+        )
         context.add_cookies([c for c in cookies if "ozon.ru" in c["domain"]])
 
+        # ВАЖНО: сначала зайдём на seller.ozon.ru, чтобы контекст подхватил куки корректно
         page = context.new_page()
+        page.goto("https://seller.ozon.ru/", wait_until="domcontentloaded")
 
-        def handle_response(resp):
-            if "/average-delivery-time/dynamic-chart" in resp.url:
-                captured["status"] = resp.status
-                try:
-                    captured["json"] = resp.json()
-                    captured["ok"] = True
-                except Exception:
-                    pass
-
-        page.on("response", handle_response)
-
-        page.goto(TARGET_PAGE, wait_until="domcontentloaded")
-        page.wait_for_timeout(3000)
-
-        # fallback: fetch прямо из браузера
-        if not captured["ok"]:
-            data = page.evaluate("""
-                async () => {
-                  const r = await fetch("/api/site/seller-analytics/average-delivery-time/dynamic-chart?__rr=3", {
-                    credentials: "include",
-                    headers: {
-                      "accept": "application/json, text/plain, */*",
-                      "x-o3-language": "ru",
-                      "x-o3-app-name": "seller-ui"
-                    }
-                  });
-                  return { status: r.status, text: await r.text() };
-                }
-            """)
-            captured["status"] = data["status"]
-            try:
-                captured["json"] = json.loads(data["text"])
-                captured["ok"] = True
-            except Exception:
-                pass
+        # Теперь делаем прямой запрос в этом же браузерном контексте
+        resp = context.request.get(API_URL)
+        status = resp.status
+        text = resp.text()
 
         browser.close()
 
-    if not captured["ok"]:
-        raise SystemExit(f"Не удалось получить JSON, HTTP {captured['status']}")
-
-    j = captured["json"]
-
+    # Сохраним ответ для диагностики
     out = PROJECT / "last_delivery.json"
-    out.write_text(json.dumps(j, ensure_ascii=False, indent=2), encoding="utf-8")
-    print("Saved JSON to:", out)
+    out.write_text(text, encoding="utf-8", errors="ignore")
+    print("Saved response to:", out)
+    print("HTTP:", status)
 
-    # ищем массив с tariff
-    def find_series(obj):
-        if isinstance(obj, dict):
-            for v in obj.values():
-                r = find_series(v)
-                if r:
-                    return r
-        elif isinstance(obj, list) and obj and isinstance(obj[0], dict):
-            if "tariff" in obj[0] or "averageDeliveryTime" in obj[0]:
-                return obj
-            for it in obj:
-                r = find_series(it)
-                if r:
-                    return r
-        return None
+    # Попробуем распарсить JSON
+    try:
+        j = json.loads(text)
+    except Exception:
+        raise SystemExit("Ответ не JSON (см. last_delivery.json)")
 
-    series = find_series(j)
-    if not series:
-        raise SystemExit("JSON есть, но не найден ряд с tariff")
+    # Если это ошибка — покажем и выходим
+    if isinstance(j, dict) and "error" in j:
+        raise SystemExit(f"API error: {j['error']}")
 
-    last = series[-1]
-    tariff = last.get("tariff", {})
+    # Ищем объект, где есть tariff/averageDeliveryTime
+    node = deep_find_first(j, {"tariff", "averageDeliveryTime", "averageDeliveryTimeHours", "tariffValue", "fee"})
+    if node is None:
+        raise SystemExit("JSON получен, но не нашёл узел с tariff/averageDeliveryTime. См. last_delivery.json")
+
+    # Пытаемся вытащить значения из разных вариантов структуры
+    tariff = node.get("tariff") if isinstance(node, dict) else None
+    if isinstance(tariff, dict):
+        tariff_value = tariff.get("tariffValue")
+        fee = tariff.get("fee")
+    else:
+        tariff_value = node.get("tariffValue")
+        fee = node.get("fee")
+
+    avg = node.get("averageDeliveryTime") or node.get("averageDeliveryTimeHours") or node.get("avgDeliveryTime")
+
     print("OK")
-    print("date:", last.get("date"))
-    print("averageDeliveryTime:", last.get("averageDeliveryTime"))
-    print("tariffValue:", tariff.get("tariffValue"))
-    print("fee:", tariff.get("fee"))
+    print("averageDeliveryTime:", avg)
+    print("tariffValue:", tariff_value)
+    print("fee:", fee)
 
 if __name__ == "__main__":
     main()
