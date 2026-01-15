@@ -410,7 +410,6 @@ def ozon_import_prices(client_id: str, api_key: str, items: List[Dict[str, Any]]
 
 _bundle_buy_cache: Dict[str, Optional[float]] = {}
 
-
 def ms_calc_bundle_buy_price(ms_token: str, ms_item: Dict[str, Any]) -> Optional[float]:
     """
     Если ms_item — комплект (bundle) и у него нет buyPrice,
@@ -431,16 +430,18 @@ def ms_calc_bundle_buy_price(ms_token: str, ms_item: Dict[str, Any]) -> Optional
         _bundle_buy_cache[href] = None
         return None
 
-        total = 0.0
-
+    # components у МойСклад бывает:
+    # 1) {"meta":..., "rows":[...]}
+    # 2) [...]
     components_obj = b.get("components") or []
-    # В МойСклад часто components = {"meta":..., "rows":[...]}
     if isinstance(components_obj, dict):
         components = components_obj.get("rows") or []
     elif isinstance(components_obj, list):
         components = components_obj
     else:
         components = []
+
+    total = 0.0
 
     for c in components:
         if not isinstance(c, dict):
@@ -456,17 +457,18 @@ def ms_calc_bundle_buy_price(ms_token: str, ms_item: Dict[str, Any]) -> Optional
         buy_val = ((assortment.get("buyPrice") or {}).get("value"))
         bp = money_from_ms(buy_val)  # руб/шт
 
-        if bp is None:
+        if bp is None or qty <= 0:
             continue
 
         total += bp * qty
 
     if total <= 0:
-        total = None
+        total_out = None
+    else:
+        total_out = total
 
-    _bundle_buy_cache[href] = total
-    return total
-
+    _bundle_buy_cache[href] = total_out
+    return total_out
 
 def fetch_ms_products_by_articles(ms_token: str, offer_ids: List[str]) -> Dict[str, Dict[str, Any]]:
     # параметры кеша
