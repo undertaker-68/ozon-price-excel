@@ -70,13 +70,31 @@ def main():
         print("Sheet seems empty (no data rows). Write only headers row 2 is absent.")
         return
 
-    nrows = last_row - 1  # количество строк данных (со 2-й по last_row)
+   # ─── Заголовки ─────────────────────────────────────────────
+    HEADER_ROW = 2
+    DATA_START_ROW = 3
+
+    # Переименовываем колонки (1 раз в сутки — безопасно)
+    ws.update(
+        f"R{HEADER_ROW}:S{HEADER_ROW}",
+        [["% к лог", "% от цены"]],
+        value_input_option="USER_ENTERED",
+    )
+
+    # ─── Данные ────────────────────────────────────────────────
+    if last_row < DATA_START_ROW:
+        print("No data rows to write.")
+        return
+
+    nrows = last_row - (DATA_START_ROW - 1)  # строки с DATA_START_ROW по last_row
     values = [[val_r, val_s] for _ in range(nrows)]
 
-    rng = f"R2:S{last_row}"
+    rng = f"R{DATA_START_ROW}:S{last_row}"
     ws.update(rng, values, value_input_option="USER_ENTERED")
 
     print(f"Wrote {nrows} rows to {rng}: R={val_r} S={val_s}")
+
+        print(f"Wrote {nrows} rows to {rng}: R={val_r} S={val_s}")
 
 if __name__ == "__main__":
     main()
