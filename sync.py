@@ -701,31 +701,29 @@ def main() -> None:
     col_q_values: List[List[Any]] = []  # значения для колонки Q (базовая логистика)
     
     for r in all_rows:
-        offer_id_text = "'" + str(r.get("offer_id", "")).strip()
+    offer_id_text = "'" + str(r.get("offer_id", "")).strip()
 
-        sheet_rows.append([
-            r.get("cab", ""),
-            r.get("category", ""),
-            r.get("type", ""),
-            r.get("sku", ""),
-            r.get("ms_name", ""),
-            offer_id_text,
-            r.get("buy_price", ""),
-            r.get("old_price", ""),
-            r.get("min_price", ""),
-            r.get("your_price", ""),
-            r.get("buyer_price", ""),
-            r.get("fbs_commission_percent", ""),
-            r.get("fbs_logistics", ""),
-        ])
-
-    col_p_values.append([
-        r.get("fbo_commission_percent", "")
+    sheet_rows.append([
+        r.get("cab", ""),
+        r.get("category", ""),
+        r.get("type", ""),
+        r.get("sku", ""),
+        r.get("ms_name", ""),
+        offer_id_text,
+        r.get("buy_price", ""),
+        r.get("old_price", ""),
+        r.get("min_price", ""),
+        r.get("your_price", ""),
+        r.get("buyer_price", ""),
+        r.get("fbs_commission_percent", ""),
+        r.get("fbs_logistics", ""),
     ])
 
-    col_q_values.append([
-        r.get("fbo_base_logistics", "")
-    ])
+    col_p_values.append([r.get("fbo_commission_percent", "")])
+    col_q_values.append([r.get("fbo_base_logistics", "")])
+
+write_rows_to_sheet(ws, header, sheet_rows, col_p_values, col_q_values)
+print(f"Done. Written {len(sheet_rows)} rows to '{worksheet_name}'.")
 
 
 if __name__ == "__main__":
