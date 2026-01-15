@@ -2,6 +2,7 @@ import json
 import re
 from pathlib import Path
 from playwright.sync_api import sync_playwright
+from datetime import datetime
 
 PROJECT = Path(__file__).resolve().parent
 COOKIES_TXT = PROJECT / "cookies.txt"
@@ -90,7 +91,7 @@ def main():
                       }});
                       return {{ status: r.status, text: await r.text() }};
                     }}
-                """)
+                
                 captured["status"] = data["status"]
                 try:
                     captured["json"] = json.loads(data["text"])
@@ -107,6 +108,13 @@ def main():
 
     # Достаём последние значения (берём первый/последний элемент — зависит от структуры, сделаем универсально)
     j = captured["json"]
+    # Сохраняем JSON, который реально получили из XHR (не /tmp от curl)
+    out_path = PROJECT / "last_delivery.json"
+    out_path.write_text(json.dumps(j, ensure_ascii=False, indent=2), encoding="utf-8")
+    print("Saved JSON to:", out_path)
+    if isinstance(j, dict):
+    print("TOP KEYS:", list(j.keys())[:60])
+
     # Часто это {"dynamic-chart":[...]} или {"data":[...]} — ищем массив с объектами, где есть tariff
     def find_series(obj):
         if isinstance(obj, dict):
