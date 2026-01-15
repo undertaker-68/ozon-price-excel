@@ -431,9 +431,21 @@ def ms_calc_bundle_buy_price(ms_token: str, ms_item: Dict[str, Any]) -> Optional
         _bundle_buy_cache[href] = None
         return None
 
-    total = 0.0
-    components = b.get("components") or []
+        total = 0.0
+
+    components_obj = b.get("components") or []
+    # В МойСклад часто components = {"meta":..., "rows":[...]}
+    if isinstance(components_obj, dict):
+        components = components_obj.get("rows") or []
+    elif isinstance(components_obj, list):
+        components = components_obj
+    else:
+        components = []
+
     for c in components:
+        if not isinstance(c, dict):
+            continue
+
         qty = c.get("quantity")
         try:
             qty = float(qty) if qty is not None else 0.0
@@ -443,8 +455,10 @@ def ms_calc_bundle_buy_price(ms_token: str, ms_item: Dict[str, Any]) -> Optional
         assortment = c.get("assortment") or {}
         buy_val = ((assortment.get("buyPrice") or {}).get("value"))
         bp = money_from_ms(buy_val)  # руб/шт
+
         if bp is None:
             continue
+
         total += bp * qty
 
     if total <= 0:
