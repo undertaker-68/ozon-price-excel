@@ -31,6 +31,8 @@ from dotenv import load_dotenv
 import gspread
 from google.oauth2.service_account import Credentials
 
+import math
+
 OZON_BASE = "https://api-seller.ozon.ru"
 MS_BASE = "https://api.moysklad.ru/api/remap/1.2"
 MS_ACCEPT = "application/json;charset=utf-8"
@@ -138,17 +140,18 @@ def extract_fbo_commission_percent(info: dict) -> Optional[float]:
 def extract_fbo_base_logistics(info: dict) -> Optional[int]:
     """
     Базовая логистика FBO (минимум), как в UI "Логистика 67–378".
-    Берём return_amount и округляем до целого рубля.
+    Берём return_amount и округляем ВНИЗ до целого рубля.
     """
     commissions = info.get("commissions") or []
     for c in commissions:
         if c.get("sale_schema") == "FBO":
-            v = c.get("return_amount")  # 67.11 -> 67
+            v = c.get("return_amount")  # пример: 67.11 -> 67
             try:
-                return int(round(float(v))) if v is not None else None
+                return int(math.floor(float(v))) if v is not None else None
             except Exception:
                 return None
     return None
+
 
 # ---------- HTTP wrappers ----------
 
