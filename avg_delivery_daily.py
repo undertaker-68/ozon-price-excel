@@ -9,22 +9,46 @@ from dotenv import load_dotenv
 import gspread
 from google.oauth2.service_account import Credentials
 
-from ozon_delivery import get_latest_average_delivery_metrics  # твой рабочий модуль :contentReference[oaicite:2]{index=2}
+from ozon_delivery import get_latest_average_delivery_metrics
+
+
+# ───────────────────────────────────────────────────────────
+# Константы
+# ───────────────────────────────────────────────────────────
 
 PROJECT_DIR = Path(__file__).resolve().parent
 COOKIES_FILE = PROJECT_DIR / "cookies.txt"
 
 LOCK_FILE = "/var/lib/ozon/avg_delivery.lock"
 
+
+# ───────────────────────────────────────────────────────────
+# Lock: 1 раз в сутки
+# ───────────────────────────────────────────────────────────
+
 def daily_lock(lock_path: str) -> bool:
-    """True = можно выполнять сегодня (и мы ставим метку). False = уже выполняли сегодня."""
+    """
+    True  — можно выполнять сегодня (и ставим метку)
+    False — уже выполняли сегодня
+    """
     p = Path(lock_path)
     today = date.today().isoformat()
-    if p.exists() and p.read_text(encoding="utf-8", errors="ignore").strip() == today:
-        return False
+
+    if p.exists():
+        try:
+            if p.read_text(encoding="utf-8").strip() == today:
+                return False
+        except Exception:
+            pass
+
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(today, encoding="utf-8")
     return True
+
+
+# ───────────────────────────────────────────────────────────
+# Google Sheets
+# ───────────────────────────────────────────────────────────
 
 def connect_sheet(service_account_json: str, spreadsheet_id: str, worksheet_name: str):
     scopes = ["https://www.googleapis.com/auth/spreadsheets"]
@@ -34,65 +58,72 @@ def connect_sheet(service_account_json: str, spreadsheet_id: str, worksheet_name
     ws = sh.worksheet(worksheet_name)
     return ws
 
+
+# ───────────────────────────────────────────────────────────
+# Main
+# ───────────────────────────────────────────────────────────
+
 def main():
     load_dotenv()
 
     spreadsheet_id = os.getenv("SPREADSHEET_ID", "").strip()
-    worksheet_name = os.getenv("WORKSHEET_NAME", "API Ozon").strip()
+    worksheet_name = os.getenv("WORKSHEET_NAME", "").strip() or "API Ozon"
     service_account_json = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON", "").strip()
 
     if not spreadsheet_id:
         raise SystemExit("SPREADSHEET_ID is required")
+
     if not service_account_json or not os.path.exists(service_account_json):
         raise SystemExit(f"GOOGLE_SERVICE_ACCOUNT_JSON not found: {service_account_json}")
+
     if not COOKIES_FILE.exists():
         raise SystemExit(f"cookies.txt not found: {COOKIES_FILE}")
 
+    # ─── lock ───────────────────────────────────────────────
     if not daily_lock(LOCK_FILE):
         print("avg-delivery: already fetched today, skip")
         return
 
-    # 1) Забираем проценты (seller.ozon.ru) — 1 раз/сутки
+    # ─── Получаем проценты с Ozon (1 запрос) ────────────────
     m = get_latest_average_delivery_metrics(COOKIES_FILE)
-    # Ozon даёт 40 и 2, в таблицу надо 0.40 и 0.02 (под процентный формат)
-    val_r = (m["tariffValue"] or 0) / 100.0
-    val_s = (m["fee"] or 0) / 100.0
+
+    val_r = (m.get("tariffValue") or 0) / 100.0
+    val_s = (m.get("fee") or 0) / 100.0
+
     print("avg-delivery metrics:", m)
 
-    # 2) Пишем в Google Sheet: колонка R (18), S (19)
+    # ─── Подключаемся к таблице ─────────────────────────────
     ws = connect_sheet(service_account_json, spreadsheet_id, worksheet_name)
 
-    # Сколько строк с данными? (по колонке A обычно есть значения)
-    colA = ws.col_values(1)  # A
-    # считаем строки с 1-й: [0] — заголовок, данные обычно с 2-й
+    # Определяем последнюю строку по колонке A
+    colA = ws.col_values(1)
     last_row = len(colA)
-    if last_row < 2:
-        print("Sheet seems empty (no data rows). Write only headers row 2 is absent.")
+
+    if last_row < 3:
+        print("No data rows (need at least row 3).")
         return
 
-  # ─── Заголовки ─────────────────────────────────────────────
-  HEADER_ROW = 2
-  DATA_START_ROW = 3
+    # ─── Заголовки ─────────────────────────────────────────
+    HEADER_ROW = 2
+    DATA_START_ROW = 3
 
-  # Переименовываем колонки
-  ws.update(
-      f"R{HEADER_ROW}:S{HEADER_ROW}",
-      [["% к лог", "% от цены"]],
-      value_input_option="USER_ENTERED",
-  )
+    ws.update(
+        f"R{HEADER_ROW}:S{HEADER_ROW}",
+        [["% к лог", "% от цены"]],
+        value_input_option="USER_ENTERED",
+    )
 
-  # ─── Данные ────────────────────────────────────────────────
-  if last_row < DATA_START_ROW:
-      print("No data rows to write.")
-      return
+    # ─── Данные ────────────────────────────────────────────
+    nrows = last_row - (DATA_START_ROW - 1)
+    values = [[val_r, val_s] for _ in range(nrows)]
 
-  nrows = last_row - (DATA_START_ROW - 1)  # строки с 3-й по last_row
-  values = [[val_r, val_s] for _ in range(nrows)]
+    rng = f"R{DATA_START_ROW}:S{last_row}"
+    ws.update(rng, values, value_input_option="USER_ENTERED")
 
-  rng = f"R{DATA_START_ROW}:S{last_row}"
-  ws.update(rng, values, value_input_option="USER_ENTERED")
+    print(f"Wrote {nrows} rows to {rng}: R={val_r} S={val_s}")
 
-  print(f"Wrote {nrows} rows to {rng}: R={val_r} S={val_s}")
+
+# ───────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
     main()
