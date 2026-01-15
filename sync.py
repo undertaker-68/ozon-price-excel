@@ -135,6 +135,20 @@ def extract_fbo_commission_percent(info: dict) -> Optional[float]:
                 return None
     return None
 
+def extract_fbo_base_logistics(info: dict) -> Optional[int]:
+    """
+    Базовая логистика FBO (минимум), как в UI "Логистика 67–378".
+    Берём return_amount и округляем до целого рубля.
+    """
+    commissions = info.get("commissions") or []
+    for c in commissions:
+        if c.get("sale_schema") == "FBO":
+            v = c.get("return_amount")  # 67.11 -> 67
+            try:
+                return int(round(float(v))) if v is not None else None
+            except Exception:
+                return None
+    return None
 
 # ---------- HTTP wrappers ----------
 
@@ -433,31 +447,40 @@ def read_existing_sheet_prices(ws) -> Tuple[Set[Tuple[str, str]], Dict[Tuple[str
     return existing_keys, existing_prices
 
 
-def write_rows_to_sheet(ws, header: List[str], rows_a_to_m: List[List[Any]], col_p_values: List[List[Any]]) -> None:
+def write_rows_to_sheet(
+    ws,
+    header: List[str],
+    rows_a_to_m: List[List[Any]],
+    col_p_values: List[List[Any]],
+    col_q_values: List[List[Any]],
+) -> None:
     """
     A..M пишем массово.
     N и O не трогаем.
-    P пишем отдельно.
+    P и Q пишем отдельно.
     """
-    # очистить A..M со 2 строки вниз
     ws.batch_clear(["A2:M"])
-    # очистить P со 2 строки вниз
     ws.batch_clear(["P2:P"])
+    ws.batch_clear(["Q2:Q"])
 
-    # A2: header (13 колонок) + data
     ws.update(
         range_name="A2",
         values=[header] + rows_a_to_m,
         value_input_option="USER_ENTERED",
     )
 
-    # P2: header для P и data
     ws.update(
         range_name="P2",
         values=[["Комиссия FBO"]] + col_p_values,
         value_input_option="USER_ENTERED",
     )
 
+    ws.update(
+        range_name="Q2",
+        values=[["Базовая логистика"]] + col_q_values,
+        value_input_option="USER_ENTERED",
+    )
+ 
 def build_rows_for_cabinet(
     cab_label: str,
     client_id: str,
@@ -546,6 +569,8 @@ def build_rows_for_cabinet(
         info = info_map.get(oid, {})
         fbs_commission_percent, fbs_logistics = extract_fbs_commission(info)
         fbo_commission_percent = extract_fbo_commission_percent(info)
+        fbo_base_logistics = extract_fbo_base_logistics(info)
+
         ms = ms_map.get(oid, {})
 
         dcid = info.get("description_category_id")
@@ -593,6 +618,7 @@ def build_rows_for_cabinet(
             "fbs_commission_percent": fbs_commission_percent,
             "fbs_logistics": fbs_logistics,
             "fbo_commission_percent": fbo_commission_percent,
+            "fbo_base_logistics": fbo_base_logistics,
         })
 
     return rows
@@ -669,7 +695,8 @@ def main() -> None:
 
     sheet_rows: List[List[Any]] = []
     col_p_values: List[List[Any]] = []  # значения для колонки P
-
+    col_q_values: List[List[Any]] = []  # значения для колонки Q (базовая логистика)
+    
     for r in all_rows:
         offer_id_text = "'" + str(r.get("offer_id", "")).strip()
        
@@ -691,9 +718,12 @@ def main() -> None:
 
         col_p_values.append([
             r.get("fbo_commission_percent", "")
+
+        col_q_values.append([r.get("fbo_base_logistics", "")])
+
     ])
 
-    write_rows_to_sheet(ws, header, sheet_rows, col_p_values)
+    write_rows_to_sheet(ws, header, sheet_rows, col_p_values, col_q_values)
     print(f"Done. Written {len(sheet_rows)} rows to '{worksheet_name}'.")
 
 
