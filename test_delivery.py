@@ -78,7 +78,7 @@ def main():
 
         # Если не поймали — попробуем прямо дернуть XHR из страницы (через fetch браузера)
                 if not captured["ok"]:
-            try:
+                    try:
                 data = page.evaluate(
                     """
                     async () => {
