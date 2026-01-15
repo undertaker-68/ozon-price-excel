@@ -1,20 +1,14 @@
 import json
-import re
 from pathlib import Path
 from playwright.sync_api import sync_playwright
-from datetime import datetime
 
 PROJECT = Path(__file__).resolve().parent
 COOKIES_TXT = PROJECT / "cookies.txt"
 
 TARGET_PAGE = "https://seller.ozon.ru/app/analytics/sales-geography/local-packaging?__rr=3"
-API_SUBSTR = "/api/site/seller-analytics/average-delivery-time/dynamic-chart"
+API_URL = "/api/site/seller-analytics/average-delivery-time/dynamic-chart?__rr=3"
 
 def parse_netscape_cookies(txt: str):
-    """
-    cookies.txt (Netscape format):
-    domain \t flag \t path \t secure \t expiry \t name \t value
-    """
     cookies = []
     for line in txt.splitlines():
         line = line.strip()
@@ -24,14 +18,13 @@ def parse_netscape_cookies(txt: str):
         if len(parts) != 7:
             continue
         domain, flag, path, secure, expiry, name, value = parts
-        # Playwright expects no leading dot sometimes, but it's ok either way
         cookies.append({
             "name": name,
             "value": value,
             "domain": domain,
             "path": path,
-            "httpOnly": False,  # Netscape doesn't store it reliably; ok for auth cookies too
             "secure": (secure.upper() == "TRUE"),
+            "httpOnly": False,
         })
     return cookies
 
@@ -39,115 +32,94 @@ def main():
     if not COOKIES_TXT.exists():
         raise SystemExit(f"Нет cookies файла: {COOKIES_TXT}")
 
-    cookies_raw = COOKIES_TXT.read_text(encoding="utf-8", errors="ignore")
-    cookies = parse_netscape_cookies(cookies_raw)
+    cookies = parse_netscape_cookies(
+        COOKIES_TXT.read_text(encoding="utf-8", errors="ignore")
+    )
+
+    captured = {"ok": False, "json": None, "status": None}
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
         context = browser.new_context(locale="ru-RU")
 
-        # Подкладываем cookies до захода на страницу
-        # Оставляем только seller.ozon.ru домен и родственные
-        context.add_cookies([c for c in cookies if "ozon.ru" in c.get("domain", "")])
+        context.add_cookies([c for c in cookies if "ozon.ru" in c["domain"]])
 
         page = context.new_page()
 
-        captured = {"ok": False, "json": None, "status": None}
-
         def handle_response(resp):
-            url = resp.url
-            if API_SUBSTR in url:
+            if "/average-delivery-time/dynamic-chart" in resp.url:
                 captured["status"] = resp.status
                 try:
                     captured["json"] = resp.json()
                     captured["ok"] = True
                 except Exception:
-                    captured["ok"] = False
+                    pass
 
         page.on("response", handle_response)
 
-        # Заходим на страницу, которая триггерит XHR
         page.goto(TARGET_PAGE, wait_until="domcontentloaded")
+        page.wait_for_timeout(3000)
 
-        # Ждём пока прилетит нужный XHR (макс 30 сек)
-        page.wait_for_timeout(2000)
-        page.wait_for_function(
-            "() => true",
-            timeout=30000
-        )
-
-        # Если не поймали — попробуем прямо дернуть XHR из страницы (через fetch браузера)
-                if not captured["ok"]:
-                    try:
-                data = page.evaluate(
-                    """
-                    async () => {
-                      const r = await fetch("/api/site/seller-analytics/average-delivery-time/dynamic-chart?__rr=3", {
-                        credentials: "include",
-                        headers: {
-                          "accept": "application/json, text/plain, */*",
-                          "x-o3-language": "ru",
-                          "x-o3-app-name": "seller-ui"
-                        }
-                      });
-                      return { status: r.status, text: await r.text() };
+        # fallback: fetch прямо из браузера
+        if not captured["ok"]:
+            data = page.evaluate("""
+                async () => {
+                  const r = await fetch("/api/site/seller-analytics/average-delivery-time/dynamic-chart?__rr=3", {
+                    credentials: "include",
+                    headers: {
+                      "accept": "application/json, text/plain, */*",
+                      "x-o3-language": "ru",
+                      "x-o3-app-name": "seller-ui"
                     }
-                    """
-                )
-                captured["status"] = data["status"]
-                try:
-                    captured["json"] = json.loads(data["text"])
-                    captured["ok"] = True
-                except Exception:
-                    captured["ok"] = False
+                  });
+                  return { status: r.status, text: await r.text() };
+                }
+            """)
+            captured["status"] = data["status"]
+            try:
+                captured["json"] = json.loads(data["text"])
+                captured["ok"] = True
             except Exception:
-                captured["ok"] = False
+                pass
 
         browser.close()
 
     if not captured["ok"]:
-        raise SystemExit(f"Не удалось получить JSON. HTTP status={captured['status']}")
+        raise SystemExit(f"Не удалось получить JSON, HTTP {captured['status']}")
 
-    # Достаём последние значения (берём первый/последний элемент — зависит от структуры, сделаем универсально)
     j = captured["json"]
-    # Сохраняем JSON, который реально получили из XHR (не /tmp от curl)
-    out_path = PROJECT / "last_delivery.json"
-    out_path.write_text(json.dumps(j, ensure_ascii=False, indent=2), encoding="utf-8")
-    print("Saved JSON to:", out_path)
-    if isinstance(j, dict):
-        print("TOP KEYS:", list(j.keys())[:60])
 
-    # Часто это {"dynamic-chart":[...]} или {"data":[...]} — ищем массив с объектами, где есть tariff
+    out = PROJECT / "last_delivery.json"
+    out.write_text(json.dumps(j, ensure_ascii=False, indent=2), encoding="utf-8")
+    print("Saved JSON to:", out)
+
+    # ищем массив с tariff
     def find_series(obj):
         if isinstance(obj, dict):
-            for k, v in obj.items():
-                if isinstance(v, list) and v and isinstance(v[0], dict) and ("tariff" in v[0] or "averageDeliveryTime" in v[0]):
-                    return v
-                res = find_series(v)
-                if res is not None:
-                    return res
-        elif isinstance(obj, list):
+            for v in obj.values():
+                r = find_series(v)
+                if r:
+                    return r
+        elif isinstance(obj, list) and obj and isinstance(obj[0], dict):
+            if "tariff" in obj[0] or "averageDeliveryTime" in obj[0]:
+                return obj
             for it in obj:
-                res = find_series(it)
-                if res is not None:
-                    return res
+                r = find_series(it)
+                if r:
+                    return r
         return None
 
     series = find_series(j)
     if not series:
-        raise SystemExit("JSON получен, но не нашёл ряд с tariff/averageDeliveryTime")
+        raise SystemExit("JSON есть, но не найден ряд с tariff")
 
     last = series[-1]
-    tariff = last.get("tariff", {}) if isinstance(last, dict) else {}
-    tariff_value = tariff.get("tariffValue")
-    fee = tariff.get("fee")
-    avg = last.get("averageDeliveryTime")
-
+    tariff = last.get("tariff", {})
     print("OK")
     print("date:", last.get("date"))
-    print("averageDeliveryTime:", avg)
-    print("tariffValue:", tariff_value)
-    print("fee:", fee)
+    print("averageDeliveryTime:", last.get("averageDeliveryTime"))
+    print("tariffValue:", tariff.get("tariffValue"))
+    print("fee:", tariff.get("fee"))
 
 if __name__ == "__main__":
     main()
