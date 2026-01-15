@@ -77,21 +77,23 @@ def main():
         )
 
         # Если не поймали — попробуем прямо дернуть XHR из страницы (через fetch браузера)
-        if not captured["ok"]:
+                if not captured["ok"]:
             try:
-                data = page.evaluate(f"""
-                    async () => {{
-                      const r = await fetch("{API_SUBSTR}?__rr=3", {{
+                data = page.evaluate(
+                    """
+                    async () => {
+                      const r = await fetch("/api/site/seller-analytics/average-delivery-time/dynamic-chart?__rr=3", {
                         credentials: "include",
-                        headers: {{
+                        headers: {
                           "accept": "application/json, text/plain, */*",
                           "x-o3-language": "ru",
                           "x-o3-app-name": "seller-ui"
-                        }}
-                      }});
-                      return {{ status: r.status, text: await r.text() }};
-                    }}
-                
+                        }
+                      });
+                      return { status: r.status, text: await r.text() };
+                    }
+                    """
+                )
                 captured["status"] = data["status"]
                 try:
                     captured["json"] = json.loads(data["text"])
@@ -113,7 +115,7 @@ def main():
     out_path.write_text(json.dumps(j, ensure_ascii=False, indent=2), encoding="utf-8")
     print("Saved JSON to:", out_path)
     if isinstance(j, dict):
-    print("TOP KEYS:", list(j.keys())[:60])
+        print("TOP KEYS:", list(j.keys())[:60])
 
     # Часто это {"dynamic-chart":[...]} или {"data":[...]} — ищем массив с объектами, где есть tariff
     def find_series(obj):
