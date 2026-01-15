@@ -33,9 +33,23 @@ from google.oauth2.service_account import Credentials
 
 import math
 
+from pathlib import Path
+from datetime import date
+from ozon_delivery import get_latest_average_delivery_metrics
+
 OZON_BASE = "https://api-seller.ozon.ru"
 MS_BASE = "https://api.moysklad.ru/api/remap/1.2"
 MS_ACCEPT = "application/json;charset=utf-8"
+
+LOCK_FILE = "/var/lib/ozon/avg_delivery.lock"
+COOKIES_FILE = Path(__file__).resolve().parent / "cookies.txt"
+
+if not daily_lock(LOCK_FILE):
+    print("avg-delivery: already fetched today, skip")
+else:
+    m = get_latest_average_delivery_metrics(COOKIES_FILE)
+    print("avg-delivery:", m)
+    # TODO: здесь записываем в твою таблицу/Excel
 
 
 # ---------- helpers ----------
@@ -54,6 +68,18 @@ def normalize_offer_id(raw: Any) -> str:
         s = s.zfill(5)
     return s
 
+def daily_lock(lock_path: str) -> bool:
+    """
+    True = можно выполнять сегодня (и мы ставим метку)
+    False = уже выполняли сегодня, выходим без запросов
+    """
+    p = Path(lock_path)
+    today = date.today().isoformat()  # YYYY-MM-DD
+    if p.exists() and p.read_text(encoding="utf-8", errors="ignore").strip() == today:
+        return False
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(today, encoding="utf-8")
+    return True
 
 def _cell_to_number(val: Any) -> Optional[float]:
     if val is None:
