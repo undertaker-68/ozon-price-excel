@@ -108,8 +108,8 @@ def main():
     DATA_START_ROW = 3
 
     ws.update(
-        f"R{HEADER_ROW}:S{HEADER_ROW}",
-        [["% к лог", "% от цены"]],
+        range_name=f"R{HEADER_ROW}:S{HEADER_ROW}",
+        values=[["% к лог", "% от цены"]],
         value_input_option="USER_ENTERED",
     )
 
@@ -118,7 +118,11 @@ def main():
     values = [[val_r, val_s] for _ in range(nrows)]
 
     rng = f"R{DATA_START_ROW}:S{last_row}"
-    ws.update(rng, values, value_input_option="USER_ENTERED")
+    ws.update(
+        range_name=rng,
+        values=values,
+        value_input_option="USER_ENTERED",
+    )
 
     print(f"Wrote {nrows} rows to {rng}: R={val_r} S={val_s}")
 
