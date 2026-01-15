@@ -33,6 +33,9 @@ from google.oauth2.service_account import Credentials
 
 import math
 
+from pathlib import Path
+from datetime import date
+
 OZON_BASE = "https://api-seller.ozon.ru"
 MS_BASE = "https://api.moysklad.ru/api/remap/1.2"
 MS_ACCEPT = "application/json;charset=utf-8"
@@ -223,6 +226,16 @@ def ms_get(ms_token: str, path: str, params: Optional[Dict[str, Any]] = None, ti
 
     raise RuntimeError(f"MoySklad {path} failed after {attempts} attempts")
 
+def ms_get_by_href(ms_token: str, href: str, params: Optional[Dict[str, Any]] = None, timeout: int = 60) -> Dict[str, Any]:
+    """
+    MoySklad иногда отдаёт meta.href полностью (https://api.moysklad.ru/api/remap/1.2/...)
+    Превращаем его в path для ms_get().
+    """
+    if href.startswith(MS_BASE):
+        path = href[len(MS_BASE):]
+    else:
+        path = href
+    return ms_get(ms_token, path, params=params, timeout=timeout)
 
 # ---------- Ozon fetchers ----------
 
@@ -382,6 +395,50 @@ def ozon_import_prices(client_id: str, api_key: str, items: List[Dict[str, Any]]
     return resp.json()
 
 # ---------- MoySklad fetchers ----------
+
+_bundle_buy_cache: Dict[str, Optional[float]] = {}
+
+def ms_calc_bundle_buy_price(ms_token: str, ms_item: Dict[str, Any]) -> Optional[float]:
+    """
+    Если ms_item — комплект (bundle) и у него нет buyPrice,
+    считаем закупку как сумму buyPrice компонентов * quantity.
+    Возвращает рубли (float).
+    """
+    meta = (ms_item or {}).get("meta") or {}
+    href = meta.get("href")
+    if not href:
+        return None
+
+    if href in _bundle_buy_cache:
+        return _bundle_buy_cache[href]
+
+    try:
+        b = ms_get_by_href(ms_token, href, params={"expand": "components.assortment"})
+    except Exception:
+        _bundle_buy_cache[href] = None
+        return None
+
+    total = 0.0
+    components = b.get("components") or []
+    for c in components:
+        qty = c.get("quantity")
+        try:
+            qty = float(qty) if qty is not None else 0.0
+        except Exception:
+            qty = 0.0
+
+        assortment = c.get("assortment") or {}
+        buy_val = ((assortment.get("buyPrice") or {}).get("value"))
+        bp = money_from_ms(buy_val)  # руб/шт
+        if bp is None:
+            continue
+        total += bp * qty
+
+    if total <= 0:
+        total = None
+
+    _bundle_buy_cache[href] = total
+    return total
 
 def fetch_ms_products_by_articles(ms_token: str, offer_ids: List[str]) -> Dict[str, Dict[str, Any]]:
     # параметры кеша
@@ -601,6 +658,12 @@ def build_rows_for_cabinet(
 
         ms_name = ms.get("name", "") if isinstance(ms, dict) else ""
         buy_price = money_from_ms((ms.get("buyPrice") or {}).get("value") if isinstance(ms, dict) else None)
+
+        # если это комплект (bundle) и закупка пустая — считаем из компонентов
+        if buy_price is None and isinstance(ms, dict):
+            meta = ms.get("meta") or {}
+            if meta.get("type") == "bundle":
+                buy_price = ms_calc_bundle_buy_price(ms_token, ms)
 
         # 3 поля цен
         if key in existing_prices:
