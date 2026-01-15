@@ -727,7 +727,14 @@ def main() -> None:
         r.get("fbo_base_logistics", "")
     ])
 
-write_rows_to_sheet(ws, header, sheet_rows, col_p_values, col_q_values)
+write_rows_to_sheet(
+    ws,
+    header,
+    sheet_rows,
+    col_p_values,
+    col_q_values,
+)
+
 print(f"Done. Written {len(sheet_rows)} rows to '{worksheet_name}'.")
 
 
