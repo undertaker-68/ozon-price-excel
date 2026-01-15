@@ -33,24 +33,9 @@ from google.oauth2.service_account import Credentials
 
 import math
 
-from pathlib import Path
-from datetime import date
-from ozon_delivery import get_latest_average_delivery_metrics
-
 OZON_BASE = "https://api-seller.ozon.ru"
 MS_BASE = "https://api.moysklad.ru/api/remap/1.2"
 MS_ACCEPT = "application/json;charset=utf-8"
-
-LOCK_FILE = "/var/lib/ozon/avg_delivery.lock"
-COOKIES_FILE = Path(__file__).resolve().parent / "cookies.txt"
-
-if not daily_lock(LOCK_FILE):
-    print("avg-delivery: already fetched today, skip")
-else:
-    m = get_latest_average_delivery_metrics(COOKIES_FILE)
-    print("avg-delivery:", m)
-    # TODO: здесь записываем в твою таблицу/Excel
-
 
 # ---------- helpers ----------
 
