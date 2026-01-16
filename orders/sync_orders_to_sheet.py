@@ -53,6 +53,17 @@ def ozon_post(client_id: str, api_key: str, path: str, payload: dict) -> dict:
         raise Exception(f"Ozon {r.status_code}: {r.text}")
     return r.json()
 
+def is_rub(row: dict) -> bool:
+    """
+    Правило A:
+    - если currency_code нет -> считаем RUB (True)
+    - если есть и != RUB -> False
+    """
+    code = row.get("currency_code") or row.get("currency") or row.get("curr_code")
+    if code is None or str(code).strip() == "":
+        return True
+    return str(code).upper() == "RUB"
+
 # ================= OZON =================
 
 def fetch_fbs(client_id, api_key, since, to):
@@ -95,16 +106,23 @@ def fetch_fbo(client_id, api_key, since, to):
         time.sleep(0.2)
 
 def extract(posting, offer_set):
-    out = defaultdict(lambda: [0, 0.0, 0.0])  # qty, client, payout
+    out = defaultdict(lambda: [0, 0.0, 0.0])  # qty, client_paid_total, payout_total
     fin = (posting.get("financial_data") or {}).get("products") or []
-    for p in fin:
-        oid = str(p.get("offer_id"))
-        if oid in offer_set:
-            out[oid][0] += int(p.get("quantity", 0))
-            out[oid][1] += float(p.get("client_price", 0))
-            out[oid][2] += float(p.get("payout", 0))
-    return out
 
+    for p in fin:
+        if not is_rub(p):
+            continue
+
+        oid = str(p.get("offer_id") or "").strip()
+        if not oid or oid not in offer_set:
+            continue
+
+        q = int(p.get("quantity", 0) or 0)
+        out[oid][0] += q
+        out[oid][1] += float(p.get("client_price", 0) or 0)  # "Оплачено покупателем"
+        out[oid][2] += float(p.get("payout", 0) or 0)
+
+    return out
 
 # ================= MAIN =================
 
