@@ -168,9 +168,9 @@ def main():
                 Q90[oid] += q
                 C90[oid] += c
                 if post_date and post_date >= today - dt.timedelta(days=7):
-                Q7[oid] += q
-                C7[oid] += c
-                P7[oid] += pay
+                    Q7[oid] += q
+                    C7[oid] += c
+                    P7[oid] += pay
 
     collect(oz1_id, oz1_key)
     collect(oz2_id, oz2_key)
