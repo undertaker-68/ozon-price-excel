@@ -43,6 +43,11 @@ def iso_date(d: dt.date) -> str:
     return d.strftime("%Y-%m-%d")
 
 
+def iso_dt_z(d: dt.date) -> str:
+    # Ozon endpoints often expect full datetime in RFC3339 (UTC)
+    return d.strftime("%Y-%m-%dT00:00:00Z")
+
+
 def parse_any_date(s: str) -> dt.date:
     # "2025-01-16T10:20:30Z" / "+00:00" / with milliseconds
     return dt.datetime.fromisoformat(s.replace("Z", "+00:00")).date()
@@ -56,7 +61,8 @@ def ozon_post(base: str, client_id: str, api_key: str, path: str, payload: dict)
         "Content-Type": "application/json",
     }
     r = requests.post(url, headers=headers, json=payload, timeout=90)
-    r.raise_for_status()
+    if not r.ok:
+        raise requests.HTTPError(f"{r.status_code} {r.reason} for {url}\nResponse: {r.text}", response=r)
     return r.json()
 
 
@@ -68,7 +74,7 @@ def fetch_fbs_postings(base: str, client_id: str, api_key: str, since: str, to: 
     limit = 1000
     while True:
         payload = {
-            "dir": "ASC",
+            "dir": "asc",
             "filter": {"since": since, "to": to},
             "limit": limit,
             "offset": offset,
@@ -107,7 +113,7 @@ def fetch_fbo_postings(base: str, client_id: str, api_key: str, since: str, to: 
 
     while True:
         payload = {
-            "dir": "ASC",
+            "dir": "asc",
             "filter": {"since": since, "to": to},
             "limit": limit,
             "offset": offset,
@@ -254,8 +260,8 @@ def collect_for_account(
     client7: Dict[str, float] = defaultdict(float)
     payout7: Dict[str, float] = defaultdict(float)
 
-    since90_s = iso_date(since90)
-    to_s = iso_date(to_date)
+    since90_s = iso_dt_z(since90)
+    to_s = iso_dt_z(to_date)
 
     def consume(p: dict):
         d = get_posting_date(p)
