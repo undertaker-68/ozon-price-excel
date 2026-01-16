@@ -168,7 +168,14 @@ def extract(posting: Dict[str, Any]) -> Dict[str, Any]:
 
         q = int(pr.get("quantity", 0) or 0)
         out[oid][0] += q
-        out[oid][1] += float(pr.get("client_price", 0) or 0)  # "Оплачено покупателем"
+        paid = (
+            p.get("customer_price")
+            or p.get("price")
+            or 0
+        )
+
+out[oid][1] += float(paid)
+
         out[oid][2] += float(pr.get("payout", 0) or 0)
 
     return out
