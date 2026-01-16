@@ -1,24 +1,41 @@
 #!/usr/bin/env python3
 # orders/sync_orders_to_sheet.py
 #
-# "Как в Ozon": считаем среднее "Оплачено покупателем" из finance transaction list.
-# Больше НЕ строим offer_id->sku по offer_id из таблицы (это ломалось).
-# Теперь: берём sku из транзакций -> по sku получаем offer_id -> агрегируем.
+# "Как в Ozon" для налога:
+# - Берем финансовые операции из /v3/finance/transaction/list (type == "orders")
+# - Используем accruals_for_sale как базу "оплачено покупателем" на уровне заказа
+# - Распределяем accruals_for_sale по товарам внутри операции пропорционально quantity
+# - Аггрегируем по SKU (из items[].sku)
+#
+# В Google Sheets:
+# - Лист "Заказы Ozon": D = offer_id; E..H будут обновлены скриптом
+# - Лист "API Ozon": содержит SKU (по словам пользователя — колонка D) и offer_id (часто колонка F).
+#   Скрипт пытается найти колонки по заголовкам, иначе использует fallback: sku_col=4 (D), offer_col=6 (F)
+#
+# Запись в лист "Заказы Ozon":
+# E = кол-во (90 дней)
+# F = оплачено покупателем (среднее, 90 дней)
+# G = кол-во (7 дней)
+# H = оплачено покупателем (среднее, 7 дней)
 
 import os
 import time
 import datetime as dt
 from collections import defaultdict
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Tuple, Optional
 
 import requests
 import gspread
 from google.oauth2.service_account import Credentials
 
 
-SHEET_NAME = "Заказы Ozon"
+SHEET_ORDERS = "Заказы Ozon"
+SHEET_API = "API Ozon"
 START_ROW = 2
 OZON_API_BASE = "https://api-seller.ozon.ru"
+
+# Если хочешь, можно отключить перезапись заголовков
+WRITE_HEADERS = True
 
 HEADERS = {
     "A1": "Категория",
@@ -70,9 +87,8 @@ def norm_offer_id(oid: str) -> str:
 
 
 def is_rub(code: Any) -> bool:
-    # правило A: если валюты нет -> считаем RUB
     if code is None or str(code).strip() == "":
-        return True
+        return True  # правило A
     return str(code).upper() == "RUB"
 
 
@@ -89,23 +105,23 @@ def ozon_post(client_id: str, api_key: str, path: str, payload: dict) -> dict:
     return r.json()
 
 
-def daterange_chunks(from_date: dt.date, to_date: dt.date, chunk_days: int = 30) -> Iterable[Tuple[dt.date, dt.date]]:
-    cur = from_date
-    while cur < to_date:
-        nxt = min(cur + dt.timedelta(days=chunk_days), to_date)
+def daterange_chunks(date_from: dt.date, date_to: dt.date, chunk_days: int = 30) -> Iterable[Tuple[dt.date, dt.date]]:
+    cur = date_from
+    while cur < date_to:
+        nxt = min(cur + dt.timedelta(days=chunk_days), date_to)
         yield cur, nxt
         cur = nxt
 
 
-# -------- finance transaction list --------
+# ---------------- finance transaction list ----------------
 
 def iter_operation_items(op: Dict[str, Any]) -> Iterable[Dict[str, Any]]:
-    # В реальных ответах у тебя items есть на верхнем уровне
     arr = op.get("items")
     if isinstance(arr, list):
         for x in arr:
             if isinstance(x, dict):
                 yield x
+
     posting = op.get("posting") or {}
     arr2 = posting.get("items")
     if isinstance(arr2, list):
@@ -125,6 +141,7 @@ def get_item_qty(item: Dict[str, Any]) -> int:
 
 def fetch_transactions(client_id: str, api_key: str, date_from: dt.date, date_to: dt.date) -> List[Dict[str, Any]]:
     all_ops: List[Dict[str, Any]] = []
+
     for frm, to in daterange_chunks(date_from, date_to, 30):
         page = 1
         while True:
@@ -143,6 +160,7 @@ def fetch_transactions(client_id: str, api_key: str, date_from: dt.date, date_to
             ops = result.get("operations") or []
             if not isinstance(ops, list):
                 ops = []
+
             all_ops.extend([o for o in ops if isinstance(o, dict)])
 
             if result.get("has_next") is True:
@@ -162,71 +180,29 @@ def fetch_transactions(client_id: str, api_key: str, date_from: dt.date, date_to
                 continue
 
             break
+
         time.sleep(0.2)
+
     return all_ops
 
 
 def collect_orders_ops(ops: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    # Берём только type=="orders" и accruals_for_sale>0
     out = []
     for op in ops:
         if str(op.get("type") or "").lower() != "orders":
             continue
-        if to_float(op.get("accruals_for_sale")) <= 0:
+        accr = to_float(op.get("accruals_for_sale"))
+        if accr <= 0:
             continue
-        cur = op.get("currency_code") or op.get("currency")  # часто пусто
+        cur = op.get("currency_code") or op.get("currency")
         if not is_rub(cur):
             continue
         out.append(op)
     return out
 
-# --- гарантируем формулу SKU в колонке C ---
-for i in range(START_ROW, START_ROW + len(ws.col_values(5))):
-    ws.update(
-        f"C{i}",
-        f'=IFERROR(VLOOKUP(E{i};\'API Ozon\'!A:B;2;0);"")'
-    )
 
-
-def extract_skus_from_ops(ops: List[Dict[str, Any]]) -> List[int]:
-    skus = set()
-    for op in ops:
-        for it in iter_operation_items(op):
-            sku = get_item_sku(it)
-            if sku:
-                skus.add(sku)
-    return sorted(skus)
-
-
-# -------- product info list: sku -> offer_id --------
-
-def fetch_sku_to_offer(client_id: str, api_key: str, skus: List[int]) -> Dict[int, str]:
-    """
-    Правильный формат /v3/product/info/list: верхний уровень sku/product_id/offer_id массивами
-    (без filter). :contentReference[oaicite:1]{index=1}
-    """
-    sku_to_offer: Dict[int, str] = {}
-    BATCH = 1000
-    for i in range(0, len(skus), BATCH):
-        batch = skus[i:i + BATCH]
-        if not batch:
-            continue
-        data = ozon_post(client_id, api_key, "/v3/product/info/list", {"sku": batch})
-        items = (data.get("result") or {}).get("items") or []
-        for it in items:
-            sku = to_int(it.get("sku"))
-            oid = str(it.get("offer_id") or "").strip()
-            if sku and oid:
-                sku_to_offer[sku] = oid
-        time.sleep(0.15)
-    return sku_to_offer
-
-
-def aggregate_avg_paid(ops: List[Dict[str, Any]], sku_to_offer: Dict[int, str]) -> Dict[str, Tuple[int, float]]:
-    """
-    На уровне операции берём accruals_for_sale и распределяем по items пропорционально qty.
-    Возвращаем offer_id -> (qty_total, sum_paid_total)
-    """
+def aggregate_paid_by_sku(ops: List[Dict[str, Any]]) -> Dict[int, Tuple[int, float]]:
+    """sku -> (qty_total, sum_paid_total)"""
     qty = defaultdict(int)
     summ = defaultdict(float)
 
@@ -245,19 +221,49 @@ def aggregate_avg_paid(ops: List[Dict[str, Any]], sku_to_offer: Dict[int, str]) 
             sku = get_item_sku(it)
             if not sku:
                 continue
-            oid = sku_to_offer.get(sku)
-            if not oid:
-                continue
             q = get_item_qty(it)
             part = accr * (q / total_q)
+            qty[sku] += q
+            summ[sku] += part
 
-            qty[oid] += q
-            summ[oid] += part
+    return {k: (qty[k], summ[k]) for k in (set(qty.keys()) | set(summ.keys()))}
 
-    out: Dict[str, Tuple[int, float]] = {}
-    for oid in set(list(qty.keys()) + list(summ.keys())):
-        out[oid] = (qty[oid], summ[oid])
-        out[norm_offer_id(oid)] = (qty[oid], summ[oid])
+
+# ---------------- Google Sheets mapping offer_id -> sku ----------------
+
+def find_col_by_header(headers: List[str], needles: List[str]) -> Optional[int]:
+    low = [str(x or "").strip().lower() for x in headers]
+    for n in needles:
+        n = n.lower()
+        for idx, h in enumerate(low, start=1):
+            if n == h or n in h:
+                return idx
+    return None
+
+
+def build_offer_to_sku(ws_api) -> Dict[str, int]:
+    header_row = ws_api.row_values(1)
+    sku_col = find_col_by_header(header_row, ["sku"])
+    offer_col = find_col_by_header(header_row, ["offer_id", "offer id", "артикул", "offer"])
+
+    # Fallback по твоим словам/предыдущим формулам:
+    if sku_col is None:
+        sku_col = 4  # D
+    if offer_col is None:
+        offer_col = 6  # F
+
+    sku_vals = ws_api.col_values(sku_col)[1:]  # начиная со 2 строки
+    offer_vals = ws_api.col_values(offer_col)[1:]
+
+    out: Dict[str, int] = {}
+    for off, sku in zip(offer_vals, sku_vals):
+        off_s = str(off or "").strip()
+        sku_i = to_int(sku)
+        if not off_s or not sku_i:
+            continue
+        out[off_s] = sku_i
+        out[norm_offer_id(off_s)] = sku_i
+
     return out
 
 
@@ -281,61 +287,59 @@ def main() -> None:
             scopes=["https://www.googleapis.com/auth/spreadsheets"],
         )
     )
-    ws = gc.open_by_key(sheet_id).worksheet(SHEET_NAME)
+    sh = gc.open_by_key(sheet_id)
+    ws_orders = sh.worksheet(SHEET_ORDERS)
+    ws_api = sh.worksheet(SHEET_API)
 
-    for cell, val in HEADERS.items():
-        ws.update(range_name=cell, values=[[val]])
+    if WRITE_HEADERS:
+        for cell, val in HEADERS.items():
+            ws_orders.update(range_name=cell, values=[[val]])
 
-    offer_ids = ws.col_values(4)[START_ROW - 1 :]
+    # offer_id из листа Заказы Ozon (колонка D)
+    offer_ids = ws_orders.col_values(4)[START_ROW - 1 :]
     offer_ids = [(x or "").strip() for x in offer_ids]
 
-    # 1) Берём транзакции (90/7) по двум аккаунтам
-    ops90 = fetch_transactions(oz1_id, oz1_key, date_from_90, date_to) + fetch_transactions(oz2_id, oz2_key, date_from_90, date_to)
-    ops7 = fetch_transactions(oz1_id, oz1_key, date_from_7, date_to) + fetch_transactions(oz2_id, oz2_key, date_from_7, date_to)
+    offer_to_sku = build_offer_to_sku(ws_api)
 
-    ops90 = collect_orders_ops(ops90)
-    ops7 = collect_orders_ops(ops7)
+    # Финансы по 2 кабинетам
+    ops90 = collect_orders_ops(
+        fetch_transactions(oz1_id, oz1_key, date_from_90, date_to)
+        + fetch_transactions(oz2_id, oz2_key, date_from_90, date_to)
+    )
+    ops7 = collect_orders_ops(
+        fetch_transactions(oz1_id, oz1_key, date_from_7, date_to)
+        + fetch_transactions(oz2_id, oz2_key, date_from_7, date_to)
+    )
 
-    # 2) Собираем sku из транзакций и строим sku->offer_id
-    skus = sorted(set(extract_skus_from_ops(ops90) + extract_skus_from_ops(ops7)))
-    if not skus:
-        raise Exception("В finance/transaction/list не нашёлся ни один sku в items[]. Проверь, что там реально есть операции type='orders' и items[].")
+    agg90 = aggregate_paid_by_sku(ops90)
+    agg7 = aggregate_paid_by_sku(ops7)
 
-    sku_to_offer = {}
-    sku_to_offer.update(fetch_sku_to_offer(oz1_id, oz1_key, skus))
-    sku_to_offer.update(fetch_sku_to_offer(oz2_id, oz2_key, skus))
-    if not sku_to_offer:
-        raise Exception("Не удалось построить sku -> offer_id через /v3/product/info/list. Проверь доступы и что sku существуют.")
-
-    # 3) Агрегируем (qty, sum_paid) и считаем среднее на сервере
-    agg90 = aggregate_avg_paid(ops90, sku_to_offer)
-    agg7 = aggregate_avg_paid(ops7, sku_to_offer)
-
-    # 4) Пишем E–H: qty + avg_paid
     rows = []
     for oid in offer_ids:
         if not oid:
             rows.append(["", "", "", ""])
             continue
 
-        k90 = oid if oid in agg90 else norm_offer_id(oid)
-        q90, s90 = agg90.get(k90, (0, 0.0))
+        sku = offer_to_sku.get(oid) or offer_to_sku.get(norm_offer_id(oid))
+        if not sku:
+            rows.append([0, "", 0, ""])  # нет SKU — нечего считать
+            continue
 
-        k7 = oid if oid in agg7 else norm_offer_id(oid)
-        q7, s7 = agg7.get(k7, (0, 0.0))
+        q90, s90 = agg90.get(sku, (0, 0.0))
+        q7, s7 = agg7.get(sku, (0, 0.0))
 
         avg90 = round(s90 / q90, 2) if q90 else ""
         avg7 = round(s7 / q7, 2) if q7 else (avg90 if avg90 != "" else "")
 
         rows.append([q90, avg90, q7, avg7])
 
-    ws.update(
+    ws_orders.update(
         range_name=f"E{START_ROW}:H{START_ROW + len(rows) - 1}",
         values=rows,
         value_input_option="USER_ENTERED",
     )
 
-    print("OK: finance-based E–H updated (sku->offer_id from transactions)")
+    print("OK: finance-based E–H updated (by SKU via 'API Ozon' mapping)")
 
 
 if __name__ == "__main__":
