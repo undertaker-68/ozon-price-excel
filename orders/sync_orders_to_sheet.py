@@ -156,25 +156,23 @@ def extract(posting: Dict[str, Any]) -> Dict[str, Any]:
     out = defaultdict(lambda: [0, 0.0, 0.0])
     fin_products = (posting.get("financial_data") or {}).get("products") or []
 
-    for pr in fin_products:
+       for pr in fin_products:
         if not is_rub_product(pr, posting):
             continue
 
         oid = str(pr.get("offer_id") or "").strip()
-        # Статусы не учитываем (по задаче "налог"), а фильтрацию "мой/не мой товар"
-        # не делаем на этапе API: иначе легко потерять данные из-за несовпадения форматов.
         if not oid:
             continue
 
         q = int(pr.get("quantity", 0) or 0)
         out[oid][0] += q
+
         paid = (
-            p.get("customer_price")
-            or p.get("price")
+            pr.get("customer_price")
+            or pr.get("price")
             or 0
         )
-
-out[oid][1] += float(paid)
+        out[oid][1] += float(paid)
 
         out[oid][2] += float(pr.get("payout", 0) or 0)
 
