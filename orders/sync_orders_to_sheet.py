@@ -22,7 +22,6 @@ HEADERS = {
     "B1": "Тип",
     "C1": "Название",
     "D1": "offer_id",
-    # ВАЖНО: колонка E удалена, поэтому блок показателей сдвинут влево на 1.
     "E1": "Заказы 90 дней, шт",
     "F1": "Средняя цена 90 дней",
     "G1": "Заказы 7 дней, шт",
@@ -63,7 +62,6 @@ def _parse_iso_date(s: Optional[str]) -> Optional[dt.date]:
 
 
 def get_post_date(posting: Dict[str, Any]) -> Optional[dt.date]:
-    """Берём первую доступную дату из набора полей, т.к. created_at часто пустой/неподходящий."""
     for key in (
         "created_at",
         "in_process_at",
@@ -79,22 +77,19 @@ def get_post_date(posting: Dict[str, Any]) -> Optional[dt.date]:
 
 
 def is_rub_product(product_row: Dict[str, Any], posting: Dict[str, Any]) -> bool:
-    """Правило A: если кода валюты нет — считаем RUB. Если есть и != RUB — пропускаем."""
     code = (
         product_row.get("currency_code")
-        or product_row.get("currency")
-        or product_row.get("curr_code")
         or (posting.get("financial_data") or {}).get("currency_code")
         or posting.get("currency_code")
     )
-    if code is None or str(code).strip() == "":
+    if not code:
         return True
     return str(code).upper() == "RUB"
 
 
 # ================= OZON =================
 
-def fetch_fbs(client_id: str, api_key: str, since: str, to: str) -> Iterable[Dict[str, Any]]:
+def fetch_fbs(client_id: str, api_key: str, since: str, to: str):
     offset = 0
     limit = 1000
     while True:
@@ -119,7 +114,7 @@ def fetch_fbs(client_id: str, api_key: str, since: str, to: str) -> Iterable[Dic
         time.sleep(0.2)
 
 
-def fetch_fbo(client_id: str, api_key: str, since: str, to: str) -> Iterable[Dict[str, Any]]:
+def fetch_fbo(client_id: str, api_key: str, since: str, to: str):
     offset = 0
     limit = 1000
     while True:
@@ -135,28 +130,21 @@ def fetch_fbo(client_id: str, api_key: str, since: str, to: str) -> Iterable[Dic
                 "with": {"financial_data": True, "products": True},
             },
         )
-
         result = data.get("result")
-        if isinstance(result, dict):
-            postings = result.get("postings") or []
-        else:
-            postings = result or []
-
+        postings = result.get("postings") if isinstance(result, dict) else result or []
         for p in postings:
             yield p
-
         if len(postings) < limit:
             break
         offset += limit
         time.sleep(0.2)
 
 
-def extract(posting: Dict[str, Any]) -> Dict[str, Any]:
-    """Возвращает {offer_id: (qty, client_paid_total, payout_total)} для одного posting."""
+def extract(posting: Dict[str, Any]):
     out = defaultdict(lambda: [0, 0.0, 0.0])
-    fin_products = (posting.get("financial_data") or {}).get("products") or []
+    fin = (posting.get("financial_data") or {}).get("products") or []
 
-       for pr in fin_products:
+    for pr in fin:
         if not is_rub_product(pr, posting):
             continue
 
@@ -164,14 +152,10 @@ def extract(posting: Dict[str, Any]) -> Dict[str, Any]:
         if not oid:
             continue
 
-        q = int(pr.get("quantity", 0) or 0)
-        out[oid][0] += q
+        qty = int(pr.get("quantity", 0) or 0)
+        out[oid][0] += qty
 
-        paid = (
-            pr.get("customer_price")
-            or pr.get("price")
-            or 0
-        )
+        paid = pr.get("customer_price") or pr.get("price") or 0
         out[oid][1] += float(paid)
 
         out[oid][2] += float(pr.get("payout", 0) or 0)
@@ -181,8 +165,7 @@ def extract(posting: Dict[str, Any]) -> Dict[str, Any]:
 
 # ================= MAIN =================
 
-def main() -> None:
-    # env
+def main():
     oz1_id = os.environ["OZON1_CLIENT_ID"]
     oz1_key = os.environ["OZON1_API_KEY"]
     oz2_id = os.environ["OZON2_CLIENT_ID"]
@@ -191,13 +174,11 @@ def main() -> None:
     sheet_id = os.environ["GOOGLE_SHEET_ID"]
     creds_json = os.environ["GOOGLE_CREDS_JSON"]
 
-    # dates
     today = dt.date.today()
     since90 = iso_dt(today - dt.timedelta(days=90))
+    since7 = today - dt.timedelta(days=7)
     to = iso_dt(today + dt.timedelta(days=1))
-    since7_date = today - dt.timedelta(days=7)
 
-    # sheets
     gc = gspread.authorize(
         Credentials.from_service_account_file(
             creds_json,
@@ -206,86 +187,43 @@ def main() -> None:
     )
     ws = gc.open_by_key(sheet_id).worksheet(SHEET_NAME)
 
-    # write headers
-    for cell, val in HEADERS.items():
-        ws.update(range_name=cell, values=[[val]])
+    for c, v in HEADERS.items():
+        ws.update(c, [[v]])
 
-    # read offer_id (колонка D)
     offer_ids = ws.col_values(4)[START_ROW - 1 :]
 
-    # aggregates
-    Q90 = defaultdict(int)
-    C90 = defaultdict(float)
-    Q7 = defaultdict(int)
-    C7 = defaultdict(float)
-    P7 = defaultdict(float)
+    Q90, C90, Q7, C7, P7 = map(defaultdict, [int, float, int, float, float])
 
-    def collect_account(client_id: str, api_key: str) -> None:
-        for p in fetch_fbs(client_id, api_key, since90, to):
-            post_date = get_post_date(p)
+    def collect(cid, key):
+        for p in list(fetch_fbs(cid, key, since90, to)) + list(fetch_fbo(cid, key, since90, to)):
+            d = get_post_date(p)
             data = extract(p)
             for oid, (q, c, pay) in data.items():
                 Q90[oid] += q
                 C90[oid] += c
-                if post_date and post_date >= since7_date:
+                if d and d >= since7:
                     Q7[oid] += q
                     C7[oid] += c
                     P7[oid] += pay
 
-        for p in fetch_fbo(client_id, api_key, since90, to):
-            post_date = get_post_date(p)
-            data = extract(p)
-            for oid, (q, c, pay) in data.items():
-                Q90[oid] += q
-                C90[oid] += c
-                if post_date and post_date >= since7_date:
-                    Q7[oid] += q
-                    C7[oid] += c
-                    P7[oid] += pay
+    collect(oz1_id, oz1_key)
+    collect(oz2_id, oz2_key)
 
-    collect_account(oz1_id, oz1_key)
-    collect_account(oz2_id, oz2_key)
-
-    # write E–I (колонка E удалена)
     rows = []
     for oid in offer_ids:
-        if not oid:
-            rows.append(["", "", "", "", ""])
-            continue
-
-        q90 = Q90[oid]
-        q7 = Q7[oid]
-
+        q90, q7 = Q90[oid], Q7[oid]
         avg90 = round(C90[oid] / q90, 2) if q90 else ""
-        if q7:
-            avg7 = round(C7[oid] / q7, 2)
-        elif q90:
-            avg7 = round(C90[oid] / q90, 2)
-        else:
-            avg7 = ""
-
+        avg7 = round(C7[oid] / q7, 2) if q7 else avg90
         rows.append([q90, avg90, q7, avg7, round(P7[oid], 2)])
 
-    ws.update(
-        range_name=f"E{START_ROW}:I{START_ROW + len(rows) - 1}",
-        values=rows,
-        value_input_option="USER_ENTERED",
-    )
+    ws.update(f"E{START_ROW}:I{START_ROW+len(rows)-1}", rows, value_input_option="USER_ENTERED")
 
-    # write profit formula J (потому что E удалили)
-    k_formulas = [
-        [
-            # I = payout, G = qty7, D = offer_id
-            f"=IFNA(I{START_ROW+i}-G{START_ROW+i}*VLOOKUP(D{START_ROW+i};'API Ozon'!F:H;3;0);\"\")"
-        ]
+    formulas = [
+        [f"=IFNA(I{START_ROW+i}-G{START_ROW+i}*VLOOKUP(D{START_ROW+i};'API Ozon'!F:H;3;0);\"\")"]
         for i in range(len(rows))
     ]
 
-    ws.update(
-        range_name=f"J{START_ROW}:J{START_ROW + len(rows) - 1}",
-        values=k_formulas,
-        value_input_option="USER_ENTERED",
-    )
+    ws.update(f"J{START_ROW}:J{START_ROW+len(rows)-1}", formulas, value_input_option="USER_ENTERED")
 
     print("OK: headers + E–J updated")
 
