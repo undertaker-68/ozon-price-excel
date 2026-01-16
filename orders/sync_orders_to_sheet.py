@@ -180,6 +180,13 @@ def collect_orders_ops(ops: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         out.append(op)
     return out
 
+# --- гарантируем формулу SKU в колонке C ---
+for i in range(START_ROW, START_ROW + len(ws.col_values(5))):
+    ws.update(
+        f"C{i}",
+        f'=IFERROR(VLOOKUP(E{i};\'API Ozon\'!A:B;2;0);"")'
+    )
+
 
 def extract_skus_from_ops(ops: List[Dict[str, Any]]) -> List[int]:
     skus = set()
