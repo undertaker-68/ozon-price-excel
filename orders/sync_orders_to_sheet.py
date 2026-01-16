@@ -153,9 +153,16 @@ def main():
     def collect(client_id, api_key):
         for p in list(fetch_fbs(client_id, api_key, since90, to)) + \
                  list(fetch_fbo(client_id, api_key, since90, to)):
-            date = dt.datetime.fromisoformat(
-                p.get("created_at", "").replace("Z", "+00:00")
-            ).date()
+            created = p.get("created_at")
+            post_date = None
+            if created:
+                try:
+                    post_date = dt.datetime.fromisoformat(
+                        created.replace("Z", "+00:00")
+                    ).date()
+                except Exception:
+                    post_date = None
+
             data = extract(p, offer_set)
             for oid, (q, c, pay) in data.items():
                 Q90[oid] += q
