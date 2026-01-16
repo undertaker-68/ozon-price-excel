@@ -22,6 +22,7 @@ HEADERS = {
     "B1": "Тип",
     "C1": "Название",
     "D1": "offer_id",
+    # колонка E удалена -> блок показателей начинается с E
     "E1": "Заказы 90 дней, шт",
     "F1": "Средняя цена 90 дней",
     "G1": "Заказы 7 дней, шт",
@@ -62,6 +63,7 @@ def _parse_iso_date(s: Optional[str]) -> Optional[dt.date]:
 
 
 def get_post_date(posting: Dict[str, Any]) -> Optional[dt.date]:
+    # created_at у Ozon не всегда есть/полезный -> берём первый доступный
     for key in (
         "created_at",
         "in_process_at",
@@ -76,20 +78,50 @@ def get_post_date(posting: Dict[str, Any]) -> Optional[dt.date]:
     return None
 
 
-def is_rub_product(product_row: Dict[str, Any], posting: Dict[str, Any]) -> bool:
-    code = (
-        product_row.get("currency_code")
-        or (posting.get("financial_data") or {}).get("currency_code")
-        or posting.get("currency_code")
-    )
-    if not code:
+def to_float(x: Any) -> float:
+    if x is None:
+        return 0.0
+    if isinstance(x, (int, float)):
+        return float(x)
+    s = str(x).strip().replace(",", ".")
+    try:
+        return float(s)
+    except Exception:
+        return 0.0
+
+
+def to_int(x: Any) -> int:
+    if x is None:
+        return 0
+    if isinstance(x, int):
+        return x
+    try:
+        return int(float(str(x).strip().replace(",", ".")))
+    except Exception:
+        return 0
+
+
+def norm_offer_id(oid: str) -> str:
+    # помогает если где-то "00512", а где-то "512"
+    s = (oid or "").strip()
+    if s.isdigit():
+        try:
+            return str(int(s))
+        except Exception:
+            return s
+    return s
+
+
+def is_rub(code: Any) -> bool:
+    # Правило A: если валюты нет -> считаем RUB
+    if code is None or str(code).strip() == "":
         return True
     return str(code).upper() == "RUB"
 
 
 # ================= OZON =================
 
-def fetch_fbs(client_id: str, api_key: str, since: str, to: str):
+def fetch_fbs(client_id: str, api_key: str, since: str, to: str) -> Iterable[Dict[str, Any]]:
     offset = 0
     limit = 1000
     while True:
@@ -114,7 +146,7 @@ def fetch_fbs(client_id: str, api_key: str, since: str, to: str):
         time.sleep(0.2)
 
 
-def fetch_fbo(client_id: str, api_key: str, since: str, to: str):
+def fetch_fbo(client_id: str, api_key: str, since: str, to: str) -> Iterable[Dict[str, Any]]:
     offset = 0
     limit = 1000
     while True:
@@ -131,41 +163,102 @@ def fetch_fbo(client_id: str, api_key: str, since: str, to: str):
             },
         )
         result = data.get("result")
-        postings = result.get("postings") if isinstance(result, dict) else result or []
+        if isinstance(result, dict):
+            postings = result.get("postings") or []
+        else:
+            postings = result or []
+
         for p in postings:
             yield p
+
         if len(postings) < limit:
             break
         offset += limit
         time.sleep(0.2)
 
 
-def extract(posting: Dict[str, Any]):
+# ================= EXTRACT =================
+
+def extract(posting: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Возвращает {offer_id: (qty, paid_total, payout_total)} для одного posting.
+
+    paid_total = "Оплачено покупателем" (по приоритету):
+      1) financial_data.products[].customer_price
+      2) posting.products[].price
+      3) financial_data.products[].price
+
+    Важно: offer_id/qty обычно лежат в posting["products"], а в financial_data часто только product_id.
+    Поэтому матчим по sku/product_id.
+    """
     out = defaultdict(lambda: [0, 0.0, 0.0])
-    fin = (posting.get("financial_data") or {}).get("products") or []
 
-    for pr in fin:
-        if not is_rub_product(pr, posting):
-            continue
+    prod_rows = posting.get("products") or []
+    fin_rows = (posting.get("financial_data") or {}).get("products") or []
 
-        oid = str(pr.get("offer_id") or "").strip()
+    # index financial by product_id (он соответствует sku в posting.products)
+    fin_by_pid: Dict[int, Dict[str, Any]] = {}
+    for fr in fin_rows:
+        pid = to_int(fr.get("product_id"))
+        if pid:
+            fin_by_pid[pid] = fr
+
+    for prod in prod_rows:
+        oid = str(prod.get("offer_id") or "").strip()
         if not oid:
             continue
 
-        qty = int(pr.get("quantity", 0) or 0)
-        out[oid][0] += qty
+        sku = to_int(prod.get("sku"))
+        fin = fin_by_pid.get(sku, {}) if sku else {}
 
-        paid = pr.get("customer_price") or pr.get("price") or 0
-        out[oid][1] += float(paid)
+        # валюта: из prod или fin; правило A (нет -> RUB)
+        cur = prod.get("currency_code")
+        if cur is None or str(cur).strip() == "":
+            cur = fin.get("currency_code")
+        if not is_rub(cur):
+            continue
 
-        out[oid][2] += float(pr.get("payout", 0) or 0)
+        qty = to_int(prod.get("quantity"))
+        if qty <= 0:
+            # иногда qty только в фин.данных
+            qty = to_int(fin.get("quantity"))
+        if qty <= 0:
+            qty = 0
+
+        # "Оплачено покупателем"
+        paid = fin.get("customer_price")
+        if paid is None or str(paid).strip() == "":
+            paid = prod.get("price")
+        if paid is None or str(paid).strip() == "":
+            paid = fin.get("price")
+        paid_f = to_float(paid)
+
+        payout_f = to_float(fin.get("payout"))
+
+        # сохраняем под оригинальным и нормализованным ключом, чтобы бить "00512"/"512"
+        for key in {oid, norm_offer_id(oid)}:
+            if not key:
+                continue
+            out[key][0] += qty
+            out[key][1] += paid_f
+            out[key][2] += payout_f
 
     return out
 
 
+def get_metric(d: Dict[str, Any], oid: str, default: Any = 0) -> Any:
+    s = (oid or "").strip()
+    if s in d:
+        return d[s]
+    ns = norm_offer_id(s)
+    if ns in d:
+        return d[ns]
+    return default
+
+
 # ================= MAIN =================
 
-def main():
+def main() -> None:
     oz1_id = os.environ["OZON1_CLIENT_ID"]
     oz1_key = os.environ["OZON1_API_KEY"]
     oz2_id = os.environ["OZON2_CLIENT_ID"]
@@ -176,8 +269,8 @@ def main():
 
     today = dt.date.today()
     since90 = iso_dt(today - dt.timedelta(days=90))
-    since7 = today - dt.timedelta(days=7)
     to = iso_dt(today + dt.timedelta(days=1))
+    since7_date = today - dt.timedelta(days=7)
 
     gc = gspread.authorize(
         Credentials.from_service_account_file(
@@ -187,43 +280,86 @@ def main():
     )
     ws = gc.open_by_key(sheet_id).worksheet(SHEET_NAME)
 
-    for c, v in HEADERS.items():
-        ws.update(c, [[v]])
+    # headers
+    for cell, val in HEADERS.items():
+        ws.update(range_name=cell, values=[[val]])
 
+    # offer_id column D
     offer_ids = ws.col_values(4)[START_ROW - 1 :]
 
-    Q90, C90, Q7, C7, P7 = map(defaultdict, [int, float, int, float, float])
+    Q90 = defaultdict(int)
+    C90 = defaultdict(float)
+    Q7 = defaultdict(int)
+    C7 = defaultdict(float)
+    P7 = defaultdict(float)
 
-    def collect(cid, key):
-        for p in list(fetch_fbs(cid, key, since90, to)) + list(fetch_fbo(cid, key, since90, to)):
-            d = get_post_date(p)
+    def collect_account(client_id: str, api_key: str) -> None:
+        for p in fetch_fbs(client_id, api_key, since90, to):
+            post_date = get_post_date(p)
             data = extract(p)
-            for oid, (q, c, pay) in data.items():
+            for oid, (q, paid, pay) in data.items():
                 Q90[oid] += q
-                C90[oid] += c
-                if d and d >= since7:
+                C90[oid] += paid
+                if post_date and post_date >= since7_date:
                     Q7[oid] += q
-                    C7[oid] += c
+                    C7[oid] += paid
                     P7[oid] += pay
 
-    collect(oz1_id, oz1_key)
-    collect(oz2_id, oz2_key)
+        for p in fetch_fbo(client_id, api_key, since90, to):
+            post_date = get_post_date(p)
+            data = extract(p)
+            for oid, (q, paid, pay) in data.items():
+                Q90[oid] += q
+                C90[oid] += paid
+                if post_date and post_date >= since7_date:
+                    Q7[oid] += q
+                    C7[oid] += paid
+                    P7[oid] += pay
 
+    collect_account(oz1_id, oz1_key)
+    collect_account(oz2_id, oz2_key)
+
+    # write E–I
     rows = []
     for oid in offer_ids:
-        q90, q7 = Q90[oid], Q7[oid]
-        avg90 = round(C90[oid] / q90, 2) if q90 else ""
-        avg7 = round(C7[oid] / q7, 2) if q7 else avg90
-        rows.append([q90, avg90, q7, avg7, round(P7[oid], 2)])
+        oid = (oid or "").strip()
+        if not oid:
+            rows.append(["", "", "", "", ""])
+            continue
 
-    ws.update(f"E{START_ROW}:I{START_ROW+len(rows)-1}", rows, value_input_option="USER_ENTERED")
+        q90 = get_metric(Q90, oid, 0)
+        q7 = get_metric(Q7, oid, 0)
 
+        c90 = get_metric(C90, oid, 0.0)
+        c7 = get_metric(C7, oid, 0.0)
+        p7 = get_metric(P7, oid, 0.0)
+
+        avg90 = round(c90 / q90, 2) if q90 else ""
+        if q7:
+            avg7 = round(c7 / q7, 2)
+        elif q90:
+            avg7 = round(c90 / q90, 2)
+        else:
+            avg7 = ""
+
+        rows.append([q90, avg90, q7, avg7, round(p7, 2)])
+
+    ws.update(
+        range_name=f"E{START_ROW}:I{START_ROW + len(rows) - 1}",
+        values=rows,
+        value_input_option="USER_ENTERED",
+    )
+
+    # profit formula in J
     formulas = [
-        [f"=IFNA(I{START_ROW+i}-G{START_ROW+i}*VLOOKUP(D{START_ROW+i};'API Ozon'!F:H;3;0);\"\")"]
+        [f'=IFNA(I{START_ROW+i}-G{START_ROW+i}*VLOOKUP(D{START_ROW+i};\'API Ozon\'!F:H;3;0);"")']
         for i in range(len(rows))
     ]
-
-    ws.update(f"J{START_ROW}:J{START_ROW+len(rows)-1}", formulas, value_input_option="USER_ENTERED")
+    ws.update(
+        range_name=f"J{START_ROW}:J{START_ROW + len(rows) - 1}",
+        values=formulas,
+        value_input_option="USER_ENTERED",
+    )
 
     print("OK: headers + E–J updated")
 
