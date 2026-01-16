@@ -22,12 +22,13 @@ HEADERS = {
     "B1": "Тип",
     "C1": "Название",
     "D1": "offer_id",
-    "F1": "Заказы 90 дней, шт",
-    "G1": "Средняя цена 90 дней",
-    "H1": "Заказы 7 дней, шт",
-    "I1": "Средняя цена для покупателя",
-    "J1": "Итого получено от Ozon (7 дней)",
-    "K1": "Чистая прибыль (7 дней)",
+    # ВАЖНО: колонка E удалена, поэтому блок показателей сдвинут влево на 1.
+    "E1": "Заказы 90 дней, шт",
+    "F1": "Средняя цена 90 дней",
+    "G1": "Заказы 7 дней, шт",
+    "H1": "Средняя цена для покупателя",
+    "I1": "Итого получено от Ozon (7 дней)",
+    "J1": "Чистая прибыль (7 дней)",
 }
 
 OZON_API_BASE = "https://api-seller.ozon.ru"
@@ -150,7 +151,7 @@ def fetch_fbo(client_id: str, api_key: str, since: str, to: str) -> Iterable[Dic
         time.sleep(0.2)
 
 
-def extract(posting: Dict[str, Any], offer_set: set) -> Dict[str, Any]:
+def extract(posting: Dict[str, Any]) -> Dict[str, Any]:
     """Возвращает {offer_id: (qty, client_paid_total, payout_total)} для одного posting."""
     out = defaultdict(lambda: [0, 0.0, 0.0])
     fin_products = (posting.get("financial_data") or {}).get("products") or []
@@ -160,6 +161,8 @@ def extract(posting: Dict[str, Any], offer_set: set) -> Dict[str, Any]:
             continue
 
         oid = str(pr.get("offer_id") or "").strip()
+        # Статусы не учитываем (по задаче "налог"), а фильтрацию "мой/не мой товар"
+        # не делаем на этапе API: иначе легко потерять данные из-за несовпадения форматов.
         if not oid:
             continue
 
@@ -202,9 +205,8 @@ def main() -> None:
     for cell, val in HEADERS.items():
         ws.update(range_name=cell, values=[[val]])
 
-    # read offer_id
+    # read offer_id (колонка D)
     offer_ids = ws.col_values(4)[START_ROW - 1 :]
-    offer_set = set(filter(None, offer_ids))
 
     # aggregates
     Q90 = defaultdict(int)
@@ -216,7 +218,7 @@ def main() -> None:
     def collect_account(client_id: str, api_key: str) -> None:
         for p in fetch_fbs(client_id, api_key, since90, to):
             post_date = get_post_date(p)
-            data = extract(p, offer_set)
+            data = extract(p)
             for oid, (q, c, pay) in data.items():
                 Q90[oid] += q
                 C90[oid] += c
@@ -227,7 +229,7 @@ def main() -> None:
 
         for p in fetch_fbo(client_id, api_key, since90, to):
             post_date = get_post_date(p)
-            data = extract(p, offer_set)
+            data = extract(p)
             for oid, (q, c, pay) in data.items():
                 Q90[oid] += q
                 C90[oid] += c
@@ -239,7 +241,7 @@ def main() -> None:
     collect_account(oz1_id, oz1_key)
     collect_account(oz2_id, oz2_key)
 
-    # write F–J
+    # write E–I (колонка E удалена)
     rows = []
     for oid in offer_ids:
         if not oid:
@@ -260,26 +262,27 @@ def main() -> None:
         rows.append([q90, avg90, q7, avg7, round(P7[oid], 2)])
 
     ws.update(
-        range_name=f"F{START_ROW}:J{START_ROW + len(rows) - 1}",
+        range_name=f"E{START_ROW}:I{START_ROW + len(rows) - 1}",
         values=rows,
         value_input_option="USER_ENTERED",
     )
 
-    # write profit formula K
+    # write profit formula J (потому что E удалили)
     k_formulas = [
         [
-            f"=IFNA(J{START_ROW+i}-H{START_ROW+i}*VLOOKUP(D{START_ROW+i};'API Ozon'!F:H;3;0);\"\")"
+            # I = payout, G = qty7, D = offer_id
+            f"=IFNA(I{START_ROW+i}-G{START_ROW+i}*VLOOKUP(D{START_ROW+i};'API Ozon'!F:H;3;0);\"\")"
         ]
         for i in range(len(rows))
     ]
 
     ws.update(
-        range_name=f"K{START_ROW}:K{START_ROW + len(rows) - 1}",
+        range_name=f"J{START_ROW}:J{START_ROW + len(rows) - 1}",
         values=k_formulas,
         value_input_option="USER_ENTERED",
     )
 
-    print("OK: headers + F–K updated")
+    print("OK: headers + E–J updated")
 
 
 if __name__ == "__main__":
