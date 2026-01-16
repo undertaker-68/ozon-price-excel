@@ -40,20 +40,18 @@ def iso_dt(d: dt.date) -> str:
 
 
 def ozon_post(client_id: str, api_key: str, path: str, payload: dict) -> dict:
-    r = requests.post(
-        OZON_API_BASE + path,
-        headers={
-            "Client-Id": client_id,
-            "Api-Key": api_key,
-            "Content-Type": "application/json",
-        },
-        json=payload,
-        timeout=90,
-    )
+    url = OZON_API_BASE + path
+    headers = {
+        "Client-Id": client_id,
+        "Api-Key": api_key,
+        "Content-Type": "application/json",
+    }
+    r = requests.post(url, headers=headers, json=payload, timeout=90)
+    print(f"Request to {url} with payload {payload}")  # Лог запроса
+    print(f"Response: {r.text}")  # Лог ответа
     if not r.ok:
         raise Exception(f"Ozon {r.status_code}: {r.text}")
     return r.json()
-
 
 # ================= OZON =================
 
