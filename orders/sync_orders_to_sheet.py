@@ -160,7 +160,7 @@ def extract(posting: Dict[str, Any], offer_set: set) -> Dict[str, Any]:
             continue
 
         oid = str(pr.get("offer_id") or "").strip()
-        if not oid or oid not in offer_set:
+        if not oid:
             continue
 
         q = int(pr.get("quantity", 0) or 0)
