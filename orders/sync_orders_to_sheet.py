@@ -1,14 +1,9 @@
 #!/usr/bin/env python3
 # orders/sync_orders_to_sheet.py
 #
-# Цель: как в UI Ozon ("Оплачено покупателем") — берём из finance transaction list
-# и считаем среднюю цену на сервере: SUM(accruals_for_sale)/SUM(qty)
-#
-# В лист пишем:
-# E = qty90
-# F = avg_paid90
-# G = qty7
-# H = avg_paid7
+# "Как в Ozon": считаем среднее "Оплачено покупателем" из finance transaction list.
+# Больше НЕ строим offer_id->sku по offer_id из таблицы (это ломалось).
+# Теперь: берём sku из транзакций -> по sku получаем offer_id -> агрегируем.
 
 import os
 import time
@@ -36,8 +31,6 @@ HEADERS = {
     "H1": "Оплачено покупателем (среднее, 7 дней)",
 }
 
-
-# -------------------- helpers --------------------
 
 def iso_dt(d: dt.date) -> str:
     return d.strftime("%Y-%m-%dT00:00:00Z")
@@ -104,78 +97,15 @@ def daterange_chunks(from_date: dt.date, to_date: dt.date, chunk_days: int = 30)
         cur = nxt
 
 
-# -------------------- product mapping (offer_id -> sku) --------------------
-
-def _clean_offer_ids(offer_ids: List[str]) -> List[str]:
-    seen = set()
-    out: List[str] = []
-    for oid in offer_ids:
-        s = (oid or "").strip()
-        if not s:
-            continue
-        for k in (s, norm_offer_id(s)):
-            if k and k not in seen:
-                seen.add(k)
-                out.append(k)
-    return out
-
-
-def fetch_offer_to_sku(client_id: str, api_key: str, offer_ids: List[str]) -> Dict[str, int]:
-    """
-    Ozon /v3/product/info/list иногда принимает:
-      A) {"offer_id":[...], "limit":1000}
-      B) {"filter":{"offer_id":[...]}, "limit":1000}
-    Поэтому делаем fallback.
-    Плюс: не отправляем пустые батчи (иначе ошибка "use either offer_id or product_id or sku").
-    """
-    offer_to_sku: Dict[str, int] = {}
-    uniq = _clean_offer_ids(offer_ids)
-    if not uniq:
-        return offer_to_sku
-
-    BATCH = 1000
-    for i in range(0, len(uniq), BATCH):
-        batch = uniq[i:i + BATCH]
-        if not batch:
-            continue
-
-        # пробуем формат A, если не выйдет — B
-        tried = []
-        for payload in (
-            {"offer_id": batch, "limit": 1000},
-            {"filter": {"offer_id": batch}, "limit": 1000},
-        ):
-            try:
-                data = ozon_post(client_id, api_key, "/v3/product/info/list", payload)
-                result = data.get("result") or {}
-                items = result.get("items") or []
-                for it in items:
-                    oid = str(it.get("offer_id") or "").strip()
-                    sku = to_int(it.get("sku"))
-                    if oid and sku:
-                        offer_to_sku[oid] = sku
-                        offer_to_sku[norm_offer_id(oid)] = sku
-                break
-            except Exception as e:
-                tried.append(str(e))
-                # если это не "use either ..." — тоже попробуем fallback
-                continue
-
-        time.sleep(0.15)
-
-    return offer_to_sku
-
-
-# -------------------- finance: transaction list --------------------
+# -------- finance transaction list --------
 
 def iter_operation_items(op: Dict[str, Any]) -> Iterable[Dict[str, Any]]:
-    # В твоём логе items лежат на верхнем уровне: op["items"] (см. :contentReference[oaicite:1]{index=1})
+    # В реальных ответах у тебя items есть на верхнем уровне
     arr = op.get("items")
     if isinstance(arr, list):
         for x in arr:
             if isinstance(x, dict):
                 yield x
-
     posting = op.get("posting") or {}
     arr2 = posting.get("items")
     if isinstance(arr2, list):
@@ -193,14 +123,8 @@ def get_item_qty(item: Dict[str, Any]) -> int:
     return q if q > 0 else 1
 
 
-def fetch_transactions(
-    client_id: str,
-    api_key: str,
-    date_from: dt.date,
-    date_to: dt.date,
-) -> List[Dict[str, Any]]:
+def fetch_transactions(client_id: str, api_key: str, date_from: dt.date, date_to: dt.date) -> List[Dict[str, Any]]:
     all_ops: List[Dict[str, Any]] = []
-
     for frm, to in daterange_chunks(date_from, date_to, 30):
         page = 1
         while True:
@@ -219,11 +143,9 @@ def fetch_transactions(
             ops = result.get("operations") or []
             if not isinstance(ops, list):
                 ops = []
-
             all_ops.extend([o for o in ops if isinstance(o, dict)])
 
-            has_next = result.get("has_next")
-            if has_next is True:
+            if result.get("has_next") is True:
                 page += 1
                 time.sleep(0.2)
                 continue
@@ -240,59 +162,90 @@ def fetch_transactions(
                 continue
 
             break
-
         time.sleep(0.2)
-
     return all_ops
 
 
-def aggregate_paid_from_orders_ops(
-    ops: List[Dict[str, Any]],
-    sku_to_offer: Dict[int, str],
-) -> Dict[str, Tuple[int, float]]:
+def collect_orders_ops(ops: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    # Берём только type=="orders" и accruals_for_sale>0
+    out = []
+    for op in ops:
+        if str(op.get("type") or "").lower() != "orders":
+            continue
+        if to_float(op.get("accruals_for_sale")) <= 0:
+            continue
+        cur = op.get("currency_code") or op.get("currency")  # часто пусто
+        if not is_rub(cur):
+            continue
+        out.append(op)
+    return out
+
+
+def extract_skus_from_ops(ops: List[Dict[str, Any]]) -> List[int]:
+    skus = set()
+    for op in ops:
+        for it in iter_operation_items(op):
+            sku = get_item_sku(it)
+            if sku:
+                skus.add(sku)
+    return sorted(skus)
+
+
+# -------- product info list: sku -> offer_id --------
+
+def fetch_sku_to_offer(client_id: str, api_key: str, skus: List[int]) -> Dict[int, str]:
     """
-    Берём операции "orders" (в твоём логе это type:"orders", operation_type_name:"Доставка покупателю")
-    и используем accruals_for_sale как "деньги от покупателя" на уровне posting.
-    Далее распределяем на items (обычно 1 item, но делаем пропорцию по qty).
+    Правильный формат /v3/product/info/list: верхний уровень sku/product_id/offer_id массивами
+    (без filter). :contentReference[oaicite:1]{index=1}
+    """
+    sku_to_offer: Dict[int, str] = {}
+    BATCH = 1000
+    for i in range(0, len(skus), BATCH):
+        batch = skus[i:i + BATCH]
+        if not batch:
+            continue
+        data = ozon_post(client_id, api_key, "/v3/product/info/list", {"sku": batch})
+        items = (data.get("result") or {}).get("items") or []
+        for it in items:
+            sku = to_int(it.get("sku"))
+            oid = str(it.get("offer_id") or "").strip()
+            if sku and oid:
+                sku_to_offer[sku] = oid
+        time.sleep(0.15)
+    return sku_to_offer
+
+
+def aggregate_avg_paid(ops: List[Dict[str, Any]], sku_to_offer: Dict[int, str]) -> Dict[str, Tuple[int, float]]:
+    """
+    На уровне операции берём accruals_for_sale и распределяем по items пропорционально qty.
+    Возвращаем offer_id -> (qty_total, sum_paid_total)
     """
     qty = defaultdict(int)
     summ = defaultdict(float)
 
     for op in ops:
-        # строго отсекаем лишнее (эквайринг/услуги/возвраты)
-        if str(op.get("type") or "").lower() != "orders":
-            continue
-
         accr = to_float(op.get("accruals_for_sale"))
         if accr <= 0:
-            continue
-
-        # валюта в transaction/list часто не приходит — считаем RUB (правило A)
-        # если вдруг появится поле currency_code — учтём
-        cur = op.get("currency_code") or op.get("currency")
-        if not is_rub(cur):
             continue
 
         items = list(iter_operation_items(op))
         if not items:
             continue
 
-        # распределяем по qty
         total_q = sum(get_item_qty(it) for it in items) or 1
 
         for it in items:
             sku = get_item_sku(it)
             if not sku:
                 continue
-            offer_id = sku_to_offer.get(sku)
-            if not offer_id:
+            oid = sku_to_offer.get(sku)
+            if not oid:
                 continue
-
             q = get_item_qty(it)
             part = accr * (q / total_q)
 
-            qty[offer_id] += q
-            summ[offer_id] += part
+            qty[oid] += q
+            summ[oid] += part
 
     out: Dict[str, Tuple[int, float]] = {}
     for oid in set(list(qty.keys()) + list(summ.keys())):
@@ -300,8 +253,6 @@ def aggregate_paid_from_orders_ops(
         out[norm_offer_id(oid)] = (qty[oid], summ[oid])
     return out
 
-
-# -------------------- main --------------------
 
 def main() -> None:
     oz1_id = os.environ["OZON1_CLIENT_ID"]
@@ -331,39 +282,40 @@ def main() -> None:
     offer_ids = ws.col_values(4)[START_ROW - 1 :]
     offer_ids = [(x or "").strip() for x in offer_ids]
 
-    # offer_id -> sku (по двум аккаунтам) + обратный индекс sku -> offer_id
-    offer_to_sku = {}
-    offer_to_sku.update(fetch_offer_to_sku(oz1_id, oz1_key, offer_ids))
-    offer_to_sku.update(fetch_offer_to_sku(oz2_id, oz2_key, offer_ids))
+    # 1) Берём транзакции (90/7) по двум аккаунтам
+    ops90 = fetch_transactions(oz1_id, oz1_key, date_from_90, date_to) + fetch_transactions(oz2_id, oz2_key, date_from_90, date_to)
+    ops7 = fetch_transactions(oz1_id, oz1_key, date_from_7, date_to) + fetch_transactions(oz2_id, oz2_key, date_from_7, date_to)
 
-    if not offer_to_sku:
-        raise Exception("Не удалось построить offer_id -> sku. Проверь, что в колонке D есть offer_id и они существуют в Ozon.")
+    ops90 = collect_orders_ops(ops90)
+    ops7 = collect_orders_ops(ops7)
 
-    sku_to_offer: Dict[int, str] = {}
-    for oid, sku in offer_to_sku.items():
-        if sku:
-            # сохраняем первый попавшийся offer_id как “каноничный”
-            sku_to_offer.setdefault(sku, oid)
+    # 2) Собираем sku из транзакций и строим sku->offer_id
+    skus = sorted(set(extract_skus_from_ops(ops90) + extract_skus_from_ops(ops7)))
+    if not skus:
+        raise Exception("В finance/transaction/list не нашёлся ни один sku в items[]. Проверь, что там реально есть операции type='orders' и items[].")
 
-    # тянем транзакции и агрегируем
-    ops90_1 = fetch_transactions(oz1_id, oz1_key, date_from_90, date_to)
-    ops90_2 = fetch_transactions(oz2_id, oz2_key, date_from_90, date_to)
-    agg90 = aggregate_paid_from_orders_ops(ops90_1 + ops90_2, sku_to_offer)
+    sku_to_offer = {}
+    sku_to_offer.update(fetch_sku_to_offer(oz1_id, oz1_key, skus))
+    sku_to_offer.update(fetch_sku_to_offer(oz2_id, oz2_key, skus))
+    if not sku_to_offer:
+        raise Exception("Не удалось построить sku -> offer_id через /v3/product/info/list. Проверь доступы и что sku существуют.")
 
-    ops7_1 = fetch_transactions(oz1_id, oz1_key, date_from_7, date_to)
-    ops7_2 = fetch_transactions(oz2_id, oz2_key, date_from_7, date_to)
-    agg7 = aggregate_paid_from_orders_ops(ops7_1 + ops7_2, sku_to_offer)
+    # 3) Агрегируем (qty, sum_paid) и считаем среднее на сервере
+    agg90 = aggregate_avg_paid(ops90, sku_to_offer)
+    agg7 = aggregate_avg_paid(ops7, sku_to_offer)
 
-    # пишем E–H: qty + avg_paid
+    # 4) Пишем E–H: qty + avg_paid
     rows = []
     for oid in offer_ids:
         if not oid:
             rows.append(["", "", "", ""])
             continue
 
-        k = oid if oid in agg90 else norm_offer_id(oid)
-        q90, s90 = agg90.get(k, (0, 0.0))
-        q7, s7 = agg7.get(k, (0, 0.0))
+        k90 = oid if oid in agg90 else norm_offer_id(oid)
+        q90, s90 = agg90.get(k90, (0, 0.0))
+
+        k7 = oid if oid in agg7 else norm_offer_id(oid)
+        q7, s7 = agg7.get(k7, (0, 0.0))
 
         avg90 = round(s90 / q90, 2) if q90 else ""
         avg7 = round(s7 / q7, 2) if q7 else (avg90 if avg90 != "" else "")
@@ -376,7 +328,7 @@ def main() -> None:
         value_input_option="USER_ENTERED",
     )
 
-    print("OK: finance-based E–H updated")
+    print("OK: finance-based E–H updated (sku->offer_id from transactions)")
 
 
 if __name__ == "__main__":
