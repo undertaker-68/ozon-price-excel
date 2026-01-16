@@ -88,14 +88,13 @@ def fetch_fbo(client_id, api_key, since, to):
             "offset": offset,
             "with": {"financial_data": True, "products": True},
         })
-        postings = data["result"]["postings"]
+        postings = data["result"]   # ← ВОТ ТУТ БЫЛА ОШИБКА
         for p in postings:
             yield p
         if len(postings) < limit:
             break
         offset += limit
         time.sleep(0.2)
-
 
 def extract(posting, offer_set):
     out = defaultdict(lambda: [0, 0.0, 0.0])  # qty, client, payout
