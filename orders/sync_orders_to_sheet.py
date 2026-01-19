@@ -61,10 +61,9 @@ def to_float(x: Any) -> float:
             return 0.0
         if isinstance(x, (int, float)):
             return float(x)
-        return float(str(x).strip().replace(",", ".")))
+        return float(str(x).strip().replace(",", "."))
     except Exception:
         return 0.0
-
 
 def is_rub(code: Any) -> bool:
     if code is None or str(code).strip() == "":
