@@ -1,41 +1,35 @@
 #!/usr/bin/env python3
 # orders/sync_orders_to_sheet.py
 #
-# "Как в Ozon" для налога:
-# - Берем финансовые операции из /v3/finance/transaction/list (type == "orders")
-# - Используем accruals_for_sale как базу "оплачено покупателем" на уровне заказа
-# - Распределяем accruals_for_sale по товарам внутри операции пропорционально quantity
-# - Аггрегируем по SKU (из items[].sku)
+# "Как в Ozon (страница Заказы)": берём оплату из posting.financial_data.products[].customer_price (RUB)
+# Источники:
+#   - FBS: /v3/posting/fbs/list
+#   - FBO: /v2/posting/fbo/list
 #
-# В Google Sheets:
-# - Лист "Заказы Ozon": D = offer_id; E..H будут обновлены скриптом
-# - Лист "API Ozon": содержит SKU (по словам пользователя — колонка D) и offer_id (часто колонка F).
-#   Скрипт пытается найти колонки по заголовкам, иначе использует fallback: sku_col=4 (D), offer_col=6 (F)
+# В Google Sheet "Заказы Ozon" пишем только:
+#   E qty90
+#   F avg_paid90
+#   G qty7
+#   H avg_paid7
 #
-# Запись в лист "Заказы Ozon":
-# E = кол-во (90 дней)
-# F = оплачено покупателем (среднее, 90 дней)
-# G = кол-во (7 дней)
-# H = оплачено покупателем (среднее, 7 дней)
+# Маппинг offer_id -> sku берём из листа "API Ozon" (таблица товаров).
 
 import os
 import time
 import datetime as dt
 from collections import defaultdict
-from typing import Any, Dict, Iterable, List, Tuple, Optional
+from typing import Any, Dict, List, Tuple, Optional
 
 import requests
 import gspread
 from google.oauth2.service_account import Credentials
 
 
-SHEET_ORDERS = "Заказы Ozon"
-SHEET_API = "API Ozon"
-START_ROW = 2
 OZON_API_BASE = "https://api-seller.ozon.ru"
 
-# Если хочешь, можно отключить перезапись заголовков
-WRITE_HEADERS = True
+SHEET_ORDERS = "Заказы Ozon"
+SHEET_API = "API Ozon"
+START_ROW = 2  # данные начинаются со 2 строки (шапка в 1-й)
 
 HEADERS = {
     "A1": "Категория",
@@ -49,54 +43,47 @@ HEADERS = {
 }
 
 
-def iso_dt(d: dt.date) -> str:
-    return d.strftime("%Y-%m-%dT00:00:00Z")
+# ---------- utils ----------
 
-
-def to_float(x: Any) -> float:
-    if x is None:
-        return 0.0
-    if isinstance(x, (int, float)):
-        return float(x)
-    s = str(x).strip().replace(",", ".")
-    try:
-        return float(s)
-    except Exception:
-        return 0.0
+def iso_dt(d: dt.datetime) -> str:
+    # Ozon ожидает ISO8601 с Z
+    return d.strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def to_int(x: Any) -> int:
-    if x is None:
-        return 0
-    if isinstance(x, int):
-        return x
     try:
+        if x is None:
+            return 0
+        if isinstance(x, int):
+            return x
         return int(float(str(x).strip().replace(",", ".")))
     except Exception:
         return 0
 
 
-def norm_offer_id(oid: str) -> str:
-    s = (oid or "").strip()
-    if s.isdigit():
-        try:
-            return str(int(s))
-        except Exception:
-            return s
-    return s
+def to_float(x: Any) -> float:
+    try:
+        if x is None:
+            return 0.0
+        if isinstance(x, (int, float)):
+            return float(x)
+        return float(str(x).strip().replace(",", "."))
+    except Exception:
+        return 0.0
 
 
 def is_rub(code: Any) -> bool:
+    # правило A: если валюты нет -> считаем RUB
     if code is None or str(code).strip() == "":
-        return True  # правило A
+        return True
     return str(code).upper() == "RUB"
 
 
 def ozon_post(client_id: str, api_key: str, path: str, payload: dict) -> dict:
     url = OZON_API_BASE + path
     headers = {
-        "Client-Id": client_id,
-        "Api-Key": api_key,
+        "Client-Id": str(client_id),
+        "Api-Key": str(api_key),
         "Content-Type": "application/json",
     }
     r = requests.post(url, headers=headers, json=payload, timeout=90)
@@ -105,181 +92,190 @@ def ozon_post(client_id: str, api_key: str, path: str, payload: dict) -> dict:
     return r.json()
 
 
-def daterange_chunks(date_from: dt.date, date_to: dt.date, chunk_days: int = 30) -> Iterable[Tuple[dt.date, dt.date]]:
-    cur = date_from
-    while cur < date_to:
-        nxt = min(cur + dt.timedelta(days=chunk_days), date_to)
-        yield cur, nxt
-        cur = nxt
-
-
-# ---------------- finance transaction list ----------------
-
-def iter_operation_items(op: Dict[str, Any]) -> Iterable[Dict[str, Any]]:
-    arr = op.get("items")
-    if isinstance(arr, list):
-        for x in arr:
-            if isinstance(x, dict):
-                yield x
-
-    posting = op.get("posting") or {}
-    arr2 = posting.get("items")
-    if isinstance(arr2, list):
-        for x in arr2:
-            if isinstance(x, dict):
-                yield x
-
-
-def get_item_sku(item: Dict[str, Any]) -> int:
-    return to_int(item.get("sku") or item.get("product_id") or item.get("id"))
-
-
-def get_item_qty(item: Dict[str, Any]) -> int:
-    q = to_int(item.get("quantity") or item.get("qty") or item.get("count"))
-    return q if q > 0 else 1
-
-
-def fetch_transactions(client_id: str, api_key: str, date_from: dt.date, date_to: dt.date) -> List[Dict[str, Any]]:
-    all_ops: List[Dict[str, Any]] = []
-
-    for frm, to in daterange_chunks(date_from, date_to, 30):
-        page = 1
-        while True:
-            payload = {
-                "filter": {
-                    "date": {"from": iso_dt(frm), "to": iso_dt(to)},
-                    "operation_type": [],
-                    "posting_number": "",
-                    "transaction_type": "all",
-                },
-                "page": page,
-                "page_size": 1000,
-            }
-            data = ozon_post(client_id, api_key, "/v3/finance/transaction/list", payload)
-            result = data.get("result") or {}
-            ops = result.get("operations") or []
-            if not isinstance(ops, list):
-                ops = []
-
-            all_ops.extend([o for o in ops if isinstance(o, dict)])
-
-            if result.get("has_next") is True:
-                page += 1
-                time.sleep(0.2)
-                continue
-
-            page_count = to_int(result.get("page_count"))
-            if page_count and page < page_count:
-                page += 1
-                time.sleep(0.2)
-                continue
-
-            if len(ops) == 1000:
-                page += 1
-                time.sleep(0.2)
-                continue
-
-            break
-
-        time.sleep(0.2)
-
-    return all_ops
-
-
-def collect_orders_ops(ops: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    out = []
-    for op in ops:
-        if str(op.get("type") or "").lower() != "orders":
-            continue
-        accr = to_float(op.get("accruals_for_sale"))
-        if accr <= 0:
-            continue
-        cur = op.get("currency_code") or op.get("currency")
-        if not is_rub(cur):
-            continue
-        out.append(op)
-    return out
-
-
-def aggregate_paid_by_sku(ops: List[Dict[str, Any]]) -> Dict[int, Tuple[int, float]]:
-    """sku -> (qty_total, sum_paid_total)"""
-    qty = defaultdict(int)
-    summ = defaultdict(float)
-
-    for op in ops:
-        accr = to_float(op.get("accruals_for_sale"))
-        if accr <= 0:
-            continue
-
-        items = list(iter_operation_items(op))
-        if not items:
-            continue
-
-        total_q = sum(get_item_qty(it) for it in items) or 1
-
-        for it in items:
-            sku = get_item_sku(it)
-            if not sku:
-                continue
-            q = get_item_qty(it)
-            part = accr * (q / total_q)
-            qty[sku] += q
-            summ[sku] += part
-
-    return {k: (qty[k], summ[k]) for k in (set(qty.keys()) | set(summ.keys()))}
-
-
-# ---------------- Google Sheets mapping offer_id -> sku ----------------
-
-def find_col_by_header(headers: List[str], needles: List[str]) -> Optional[int]:
-    low = [str(x or "").strip().lower() for x in headers]
-    for n in needles:
-        n = n.lower()
-        for idx, h in enumerate(low, start=1):
-            if n == h or n in h:
-                return idx
-    return None
-
+# ---------- Google Sheets mapping offer_id -> sku from "API Ozon" ----------
 
 def build_offer_to_sku(ws_api) -> Dict[str, int]:
-    header_row = ws_api.row_values(1)
-    sku_col = find_col_by_header(header_row, ["sku"])
-    offer_col = find_col_by_header(header_row, ["offer_id", "offer id", "артикул", "offer"])
+    """
+    Пытаемся найти колонки offer_id и sku по заголовкам.
+    Если не нашли — используем fallback:
+      offer_id = колонка D (4)
+      sku      = колонка Q (17)  <-- если не так, скажи и поменяем
+    """
+    values = ws_api.get_all_values()
+    if not values:
+        raise Exception("Лист 'API Ozon' пустой")
 
-    # Fallback по твоим словам/предыдущим формулам:
-    if sku_col is None:
-        sku_col = 4  # D
-    if offer_col is None:
-        offer_col = 6  # F
+    header = values[0]
+    idx_offer = None
+    idx_sku = None
 
-    sku_vals = ws_api.col_values(sku_col)[1:]  # начиная со 2 строки
-    offer_vals = ws_api.col_values(offer_col)[1:]
+    def norm(s: str) -> str:
+        return (s or "").strip().lower()
 
-    out: Dict[str, int] = {}
-    for off, sku in zip(offer_vals, sku_vals):
-        off_s = str(off or "").strip()
-        sku_i = to_int(sku)
-        if not off_s or not sku_i:
+    for i, name in enumerate(header):
+        n = norm(name)
+        if n in ("offer_id", "offerid", "offer id", "артикул продавца", "артикул"):
+            idx_offer = i
+        if n in ("sku", "ozon_sku", "ozon sku"):
+            idx_sku = i
+
+    # fallback (если заголовков нет или они другие)
+    if idx_offer is None:
+        idx_offer = 3  # D
+    if idx_sku is None:
+        idx_sku = 16   # Q (часто так). Если у тебя иначе — скажи букву.
+
+    offer_to_sku: Dict[str, int] = {}
+    for row in values[1:]:
+        if idx_offer >= len(row) or idx_sku >= len(row):
             continue
-        out[off_s] = sku_i
-        out[norm_offer_id(off_s)] = sku_i
+        offer = (row[idx_offer] or "").strip()
+        sku = to_int(row[idx_sku])
+        if offer and sku:
+            offer_to_sku[offer] = sku
+            # нормализация "00512" -> "512" тоже иногда нужна
+            if offer.isdigit():
+                offer_to_sku[str(int(offer))] = sku
 
+    return offer_to_sku
+
+
+# ---------- Ozon postings fetchers ----------
+
+def fetch_fbs_postings(client_id: str, api_key: str, since: str, to: str) -> List[dict]:
+    postings: List[dict] = []
+    offset = 0
+    limit = 1000
+    while True:
+        payload = {
+            "dir": "desc",
+            "filter": {"since": since, "to": to},
+            "limit": limit,
+            "offset": offset,
+            "with": {"financial_data": True, "products": True},
+        }
+        data = ozon_post(client_id, api_key, "/v3/posting/fbs/list", payload)
+        res = data.get("result") or {}
+        batch = res.get("postings") or []
+        postings.extend(batch)
+
+        has_next = res.get("has_next")
+        if has_next is True:
+            offset += limit
+            time.sleep(0.2)
+            continue
+
+        # иногда has_next нет — ориентируемся по длине
+        if len(batch) == limit:
+            offset += limit
+            time.sleep(0.2)
+            continue
+
+        break
+
+    return postings
+
+
+def fetch_fbo_postings(client_id: str, api_key: str, since: str, to: str) -> List[dict]:
+    postings: List[dict] = []
+    offset = 0
+    limit = 1000
+    while True:
+        payload = {
+            "dir": "desc",
+            "filter": {"since": since, "to": to},
+            "limit": limit,
+            "offset": offset,
+            "with": {"financial_data": True, "products": True},
+        }
+        data = ozon_post(client_id, api_key, "/v2/posting/fbo/list", payload)
+        batch = data.get("result") or []
+        postings.extend(batch)
+
+        # у FBO list обычно нет has_next — идём по offset пока не станет меньше limit
+        if len(batch) == limit:
+            offset += limit
+            time.sleep(0.2)
+            continue
+        break
+
+    return postings
+
+
+def iter_paid_lines(posting: dict) -> List[Tuple[str, int, float]]:
+    """
+    Возвращает список линий (offer_id, qty, customer_price) для posting.
+    Берём строго из financial_data.products[]:
+      customer_price + customer_currency_code == RUB
+    """
+    lines: List[Tuple[str, int, float]] = []
+
+    fin = posting.get("financial_data") or {}
+    fin_products = fin.get("products") or []
+    if not isinstance(fin_products, list):
+        return lines
+
+    # offer_id берём из posting.products по product_id/sku соответствию как fallback
+    # но в большинстве случаев проще: в fin_products есть product_id, а offer_id берём из posting.products
+    posting_products = posting.get("products") or []
+    prodid_to_offer: Dict[int, str] = {}
+    for p in posting_products:
+        pid = to_int(p.get("sku") or p.get("product_id") or p.get("id"))
+        oid = str(p.get("offer_id") or "").strip()
+        if pid and oid:
+            prodid_to_offer[pid] = oid
+
+    for pr in fin_products:
+        cur = pr.get("customer_currency_code") or pr.get("currency_code") or "RUB"
+        if not is_rub(cur):
+            continue
+        customer_price = to_float(pr.get("customer_price"))
+        if customer_price <= 0:
+            continue
+        qty = to_int(pr.get("quantity")) or 1
+
+        pid = to_int(pr.get("product_id") or pr.get("sku"))
+        offer_id = str(pr.get("offer_id") or "").strip()  # иногда бывает
+        if not offer_id and pid:
+            offer_id = prodid_to_offer.get(pid, "")
+
+        if offer_id:
+            lines.append((offer_id, qty, customer_price))
+
+    return lines
+
+
+def aggregate_paid(postings: List[dict]) -> Dict[str, Tuple[int, float]]:
+    """
+    offer_id -> (qty_sum, paid_sum)
+    """
+    qty = defaultdict(int)
+    paid = defaultdict(float)
+
+    for p in postings:
+        for offer_id, q, customer_price in iter_paid_lines(p):
+            qty[offer_id] += q
+            paid[offer_id] += customer_price
+
+    out: Dict[str, Tuple[int, float]] = {}
+    for oid in set(list(qty.keys()) + list(paid.keys())):
+        out[oid] = (qty[oid], paid[oid])
+        if oid.isdigit():
+            out[str(int(oid))] = (qty[oid], paid[oid])
     return out
 
 
+# ---------- main ----------
+
 def main() -> None:
-    oz1_id = os.environ["OZON1_CLIENT_ID"]
-    oz1_key = os.environ["OZON1_API_KEY"]
-    oz2_id = os.environ["OZON2_CLIENT_ID"]
-    oz2_key = os.environ["OZON2_API_KEY"]
+    # env names from your .env
+    oz1_id = os.environ["OZON_CLIENT_ID_1"]
+    oz1_key = os.environ["OZON_API_KEY_1"]
+    oz2_id = os.environ.get("OZON_CLIENT_ID_2", "")
+    oz2_key = os.environ.get("OZON_API_KEY_2", "")
 
-    sheet_id = os.environ["GOOGLE_SHEET_ID"]
-    creds_json = os.environ["GOOGLE_CREDS_JSON"]
-
-    today = dt.date.today()
-    date_to = today + dt.timedelta(days=1)
-    date_from_90 = today - dt.timedelta(days=90)
-    date_from_7 = today - dt.timedelta(days=7)
+    sheet_id = os.environ["SPREADSHEET_ID"]
+    creds_json = os.environ["GOOGLE_SERVICE_ACCOUNT_JSON"]
 
     gc = gspread.authorize(
         Credentials.from_service_account_file(
@@ -291,45 +287,58 @@ def main() -> None:
     ws_orders = sh.worksheet(SHEET_ORDERS)
     ws_api = sh.worksheet(SHEET_API)
 
-    if WRITE_HEADERS:
-        for cell, val in HEADERS.items():
-            ws_orders.update(range_name=cell, values=[[val]])
+    # headers (только чтобы названия были норм)
+    for cell, val in HEADERS.items():
+        ws_orders.update(range_name=cell, values=[[val]])
 
-    # offer_id из листа Заказы Ozon (колонка D)
+    # offer_id list from Orders sheet col D
     offer_ids = ws_orders.col_values(4)[START_ROW - 1 :]
     offer_ids = [(x or "").strip() for x in offer_ids]
 
+    # mapping offer_id -> sku from API sheet (на будущее, если нужно)
     offer_to_sku = build_offer_to_sku(ws_api)
+    if not offer_to_sku:
+        print("WARN: offer_to_sku mapping empty (API Ozon sheet). Continue anyway.")
 
-    # Финансы по 2 кабинетам
-    ops90 = collect_orders_ops(
-        fetch_transactions(oz1_id, oz1_key, date_from_90, date_to)
-        + fetch_transactions(oz2_id, oz2_key, date_from_90, date_to)
-    )
-    ops7 = collect_orders_ops(
-        fetch_transactions(oz1_id, oz1_key, date_from_7, date_to)
-        + fetch_transactions(oz2_id, oz2_key, date_from_7, date_to)
-    )
+    now = dt.datetime.utcnow()
+    since_7 = iso_dt(now - dt.timedelta(days=7))
+    since_90 = iso_dt(now - dt.timedelta(days=90))
+    to = iso_dt(now + dt.timedelta(days=1))
 
-    agg90 = aggregate_paid_by_sku(ops90)
-    agg7 = aggregate_paid_by_sku(ops7)
+    # fetch postings for 90 days
+    p90: List[dict] = []
+    p90 += fetch_fbs_postings(oz1_id, oz1_key, since_90, to)
+    p90 += fetch_fbo_postings(oz1_id, oz1_key, since_90, to)
+    if oz2_id and oz2_key:
+        p90 += fetch_fbs_postings(oz2_id, oz2_key, since_90, to)
+        p90 += fetch_fbo_postings(oz2_id, oz2_key, since_90, to)
 
-    rows = []
+    agg90 = aggregate_paid(p90)
+
+    # fetch postings for 7 days
+    p7: List[dict] = []
+    p7 += fetch_fbs_postings(oz1_id, oz1_key, since_7, to)
+    p7 += fetch_fbo_postings(oz1_id, oz1_key, since_7, to)
+    if oz2_id and oz2_key:
+        p7 += fetch_fbs_postings(oz2_id, oz2_key, since_7, to)
+        p7 += fetch_fbo_postings(oz2_id, oz2_key, since_7, to)
+
+    agg7 = aggregate_paid(p7)
+
+    # prepare rows E–H
+    rows: List[List[Any]] = []
     for oid in offer_ids:
         if not oid:
             rows.append(["", "", "", ""])
             continue
 
-        sku = offer_to_sku.get(oid) or offer_to_sku.get(norm_offer_id(oid))
-        if not sku:
-            rows.append([0, "", 0, ""])  # нет SKU — нечего считать
-            continue
-
-        q90, s90 = agg90.get(sku, (0, 0.0))
-        q7, s7 = agg7.get(sku, (0, 0.0))
-
+        k = oid if oid in agg90 else (str(int(oid)) if oid.isdigit() else oid)
+        q90, s90 = agg90.get(k, (0, 0.0))
         avg90 = round(s90 / q90, 2) if q90 else ""
-        avg7 = round(s7 / q7, 2) if q7 else (avg90 if avg90 != "" else "")
+
+        k7 = oid if oid in agg7 else (str(int(oid)) if oid.isdigit() else oid)
+        q7, s7 = agg7.get(k7, (0, 0.0))
+        avg7 = round(s7 / q7, 2) if q7 else ""
 
         rows.append([q90, avg90, q7, avg7])
 
@@ -339,7 +348,7 @@ def main() -> None:
         value_input_option="USER_ENTERED",
     )
 
-    print("OK: finance-based E–H updated (by SKU via 'API Ozon' mapping)")
+    print("OK: postings-based E–H updated (customer_price)")
 
 
 if __name__ == "__main__":
