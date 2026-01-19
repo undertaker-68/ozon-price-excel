@@ -587,13 +587,13 @@ def write_rows_to_sheet(
 
     ws.update(
         range_name="Q2",
-        values=[["Комиссия FBO"]] + col_q_values,
+        values=[["% FBO"]] + col_q_values,
         value_input_option="USER_ENTERED",
     )
 
     ws.update(
         range_name="R2",
-        values=[["Базовая логистика"]] + col_r_values,
+        values=[["Баз лог"]] + col_r_values,
         value_input_option="USER_ENTERED",
     )
 
@@ -789,20 +789,20 @@ def main() -> None:
     all_rows = sort_rows(all_rows)
 
     header = [
-        "Cabinet",
-        "Категория товара нижнего уровня",
-        "Тип товара",
+        "Каб",
+        "Категория",
+        "Тип",
         "SKU",
-        "Название товара (МойСклад)",
+        "Название",
         "offer_id",
         "Остаток",
-        "Закупочная цена",
-        "Цена до скидок",
-        "Минимальная цена",
-        "Ваша цена",
-        "Цена для покупателя",
-        "Комиссия FBS",
-        "Логистика FBS",
+        "Закуп",
+        "Цена до",
+        "Мин цена",
+        "Цена Oz",
+        "Цена налог",
+        "% FBS",
+        "Лог FBS",
     ]
 
     sheet_rows: List[List[Any]] = []
