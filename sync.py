@@ -573,34 +573,46 @@ def write_rows_to_sheet(
     col_r_values: List[List[Any]],
 ) -> None:
     """
-    Пишем только A..N + Q + R.
-    O, P, U, V, W — НЕ ТРОГАЕМ.
+    Пишем A..H + K..N + Q + R.
+    I и J НЕ ТРОГАЕМ (чтобы формулы не удалялись).
+    O, P, U, V, W — тоже НЕ трогаем.
     """
-    # чистим только строки данных (с 3-й), чтобы не портить шапку/формулы
-    ws.batch_clear(["A3:N"])
+
+    # чистим только то, что реально перезаписываем
+    ws.batch_clear(["A3:H"])
+    ws.batch_clear(["K3:N"])
     ws.batch_clear(["Q3:Q"])
     ws.batch_clear(["R3:R"])
 
+    # A..H
+    left_header = header[0:8]  # A..H
+    left_rows = [r[0:8] for r in rows_a_to_n]
     ws.update(
-        range_name="A2",
-        values=[header] + rows_a_to_n,
+        range_name="A2:H",
+        values=[left_header] + left_rows,
         value_input_option="USER_ENTERED",
     )
 
+    # K..N (пропускаем I,J)
+    right_header = header[10:14]  # K..N
+    right_rows = [r[10:14] for r in rows_a_to_n]
+    ws.update(
+        range_name="K2:N",
+        values=[right_header] + right_rows,
+        value_input_option="USER_ENTERED",
+    )
+
+    # Q, R как было
     ws.update(
         range_name="Q2",
         values=[["% FBO"]] + col_q_values,
         value_input_option="USER_ENTERED",
     )
-
     ws.update(
         range_name="R2",
         values=[["Баз лог"]] + col_r_values,
         value_input_option="USER_ENTERED",
     )
-
-
-# ---------- business logic ----------
 
 def build_rows_for_cabinet(
     cab_label: str,
