@@ -536,6 +536,7 @@ def read_existing_sheet_prices(ws) -> Tuple[Set[Tuple[str, str]], Dict[Tuple[str
     OLD_COL = 9        # I (Цена до скидок)
     MIN_COL = 10       # J (Минимальная)
     YOUR_COL = 11      # K (Ваша)
+    BUYER_COL = 12     # L (Цена для покупателя)
 
     values = ws.get_all_values()
     existing_keys: Set[Tuple[str, str]] = set()
@@ -558,6 +559,7 @@ def read_existing_sheet_prices(ws) -> Tuple[Set[Tuple[str, str]], Dict[Tuple[str
             "old_price": _cell_to_number(get(OLD_COL)),
             "min_price": _cell_to_number(get(MIN_COL)),
             "your_price": _cell_to_number(get(YOUR_COL)),
+            "buyer_price": _cell_to_number(get(BUYER_COL)),
         }
 
     return existing_keys, existing_prices
@@ -624,8 +626,6 @@ def build_rows_for_cabinet(
 
     # PUSH в Ozon только если явно включено env PUSH_PRICE=1
     if push_price and existing_offer_ids:
-        oz_existing = fetch_ozon_prices_by_offer_ids(client_id, api_key, existing_offer_ids)
-
         to_push: List[Dict[str, Any]] = []
 
         for oid in existing_offer_ids:
@@ -634,37 +634,31 @@ def build_rows_for_cabinet(
             sheet_min = sheet_p.get("min_price")
             sheet_your = sheet_p.get("your_price")
 
-            oz_p = oz_existing.get(oid, {}) or {}
-            oz_old = money_from_ozon(oz_p.get("old_price"))
-            oz_min = money_from_ozon(oz_p.get("min_price"))
-            oz_your = money_from_ozon(oz_p.get("marketing_seller_price"))
-
+            # Больше НЕ читаем цены из Ozon. Таблица (I,J,K) — единственный источник правды.
+            # Значит, при PUSH отправляем то, что заполнено в таблице.
             row: Dict[str, Any] = {"offer_id": oid}
-            any_change = False
+            any_value = False
 
-            if sheet_old is not None and _price_changed(sheet_old, oz_old):
+            if sheet_old is not None:
                 row["old_price"] = sheet_old
-                any_change = True
-
-            if sheet_min is not None and _price_changed(sheet_min, oz_min):
+                any_value = True
+            if sheet_min is not None:
                 row["min_price"] = sheet_min
-                any_change = True
-
-            if sheet_your is not None and _price_changed(sheet_your, oz_your):
+                any_value = True
+            if sheet_your is not None:
                 row["price"] = sheet_your
-                any_change = True
+                any_value = True
 
-            if any_change:
+            if any_value:
                 to_push.append(row)
 
         if to_push:
             ozon_import_prices(client_id, api_key, to_push)
-            print(f"{cab_label}: pushed changed prices for {len(to_push)} items (of {len(existing_offer_ids)})")
+            print(f"{cab_label}: pushed prices for {len(to_push)} items (of {len(existing_offer_ids)})")
         else:
-            print(f"{cab_label}: no price changes to push (of {len(existing_offer_ids)})")
+            print(f"{cab_label}: nothing to push (no filled I/J/K) (of {len(existing_offer_ids)})")
 
-    prices_map_new = fetch_ozon_prices_by_offer_ids(client_id, api_key, new_offer_ids)
-    prices_map_all = fetch_ozon_prices_by_offer_ids(client_id, api_key, offer_ids)
+    # Цены из Ozon больше не подтягиваем (только остатки/комиссии/и т.д.)
     stocks_map = fetch_ozon_stocks_by_offer_ids(client_id, api_key, offer_ids)
 
     category_map, type_map = fetch_ozon_tree_maps(client_id, api_key)
@@ -708,14 +702,13 @@ def build_rows_for_cabinet(
             old_price = existing_prices[key].get("old_price")
             min_price = existing_prices[key].get("min_price")
             your_price = existing_prices[key].get("your_price")
+            buyer_price = existing_prices[key].get("buyer_price")
         else:
-            pnew = prices_map_new.get(oid, {})
-            old_price = money_from_ozon(pnew.get("old_price"))
-            min_price = money_from_ozon(pnew.get("min_price"))
-            your_price = money_from_ozon(pnew.get("marketing_seller_price"))
-
-        pall = prices_map_all.get(oid, {})
-        buyer_price = money_from_ozon(pall.get("price"))
+            # Новый товар в таблице: цены не подтягиваем из Ozon, оставляем пусто.
+            old_price = None
+            min_price = None
+            your_price = None
+            buyer_price = None
 
         rows.append({
             "cab": cab_label,
