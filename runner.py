@@ -2,7 +2,7 @@ from fastapi import FastAPI, Request
 import subprocess
 import os
 
-TOKEN = "SECRET_TOKEN"
+TOKEN = "4839532ff898023890dsad"
 
 app = FastAPI()
 
