@@ -580,7 +580,8 @@ def write_rows_to_sheet(
 
     # чистим только то, что реально перезаписываем
     ws.batch_clear(["A3:H"])
-    ws.batch_clear(["K3:N"])
+    ws.batch_clear(["K3:K"])
+    ws.batch_clear(["M3:N"])
     ws.batch_clear(["Q3:Q"])
     ws.batch_clear(["R3:R"])
 
@@ -597,8 +598,8 @@ def write_rows_to_sheet(
     right_header = header[10:14]  # K..N
     right_rows = [r[10:14] for r in rows_a_to_n]
     ws.update(
-        range_name="K2:N",
-        values=[right_header] + right_rows,
+        range_name="K2:K",
+        values=[[header[10]]] + [[r[10]] for r in rows_a_to_n],
         value_input_option="USER_ENTERED",
     )
 
@@ -611,6 +612,11 @@ def write_rows_to_sheet(
     ws.update(
         range_name="R2",
         values=[["Баз лог"]] + col_r_values,
+        value_input_option="USER_ENTERED",
+    )
+     ws.update(
+        range_name="M2:N",
+        values=[header[12:14]] + [r[12:14] for r in rows_a_to_n],
         value_input_option="USER_ENTERED",
     )
 
