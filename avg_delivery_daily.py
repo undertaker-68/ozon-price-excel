@@ -87,8 +87,11 @@ def main():
     # ─── Получаем проценты с Ozon (1 запрос) ────────────────
     m = get_latest_average_delivery_metrics(COOKIES_FILE)
 
-    val_r = (m.get("tariffValue") or 0) / 100.0
-    val_s = (m.get("fee") or 0) / 100.0
+    # ВАЖНО:
+    # В листе API Ozon колонка R занята под "Баз лог" (см. sync.py).
+    # Поэтому метрики с seller.ozon.ru (tariffValue/fee) пишем в S и T.
+    val_s = (m.get("tariffValue") or 0) / 100.0   # % к логистике
+    val_t = (m.get("fee") or 0) / 100.0           # % от цены
 
     print("avg-delivery metrics:", m)
 
@@ -108,23 +111,23 @@ def main():
     DATA_START_ROW = 3
 
     ws.update(
-        range_name=f"R{HEADER_ROW}:S{HEADER_ROW}",
+        range_name=f"S{HEADER_ROW}:T{HEADER_ROW}",
         values=[["% к лог", "% от цены"]],
         value_input_option="USER_ENTERED",
     )
 
     # ─── Данные ────────────────────────────────────────────
     nrows = last_row - (DATA_START_ROW - 1)
-    values = [[val_r, val_s] for _ in range(nrows)]
+    values = [[val_s, val_t] for _ in range(nrows)]
 
-    rng = f"R{DATA_START_ROW}:S{last_row}"
+    rng = f"S{DATA_START_ROW}:T{last_row}"
     ws.update(
         range_name=rng,
         values=values,
         value_input_option="USER_ENTERED",
     )
 
-    print(f"Wrote {nrows} rows to {rng}: R={val_r} S={val_s}")
+    print(f"Wrote {nrows} rows to {rng}: S={val_s} T={val_t}")
 
 
 # ───────────────────────────────────────────────────────────
