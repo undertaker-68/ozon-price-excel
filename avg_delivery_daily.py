@@ -20,6 +20,7 @@ PROJECT_DIR = Path(__file__).resolve().parent
 COOKIES_FILE = PROJECT_DIR / "cookies.txt"
 
 LOCK_FILE = "/var/lib/ozon/avg_delivery.lock"
+CACHE_FILE = "/var/lib/ozon/avg_delivery_cache.json"
 
 
 # ───────────────────────────────────────────────────────────
@@ -44,6 +45,36 @@ def daily_lock(lock_path: str) -> bool:
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(today, encoding="utf-8")
     return True
+
+
+def load_cached_metrics(cache_path: str) -> dict:
+    """Возвращает кеш метрик за сегодня, если он существует."""
+    p = Path(cache_path)
+    if not p.exists():
+        return {}
+    try:
+        import json
+
+        data = json.loads(p.read_text(encoding="utf-8") or "{}")
+        if data.get("date") == date.today().isoformat() and isinstance(data.get("metrics"), dict):
+            return data["metrics"]
+    except Exception:
+        return {}
+    return {}
+
+
+def save_cached_metrics(cache_path: str, metrics: dict) -> None:
+    """Сохраняем метрики на сегодня, чтобы можно было перезаписать ячейки повторным запуском."""
+    try:
+        import json
+
+        p = Path(cache_path)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        payload = {"date": date.today().isoformat(), "metrics": metrics}
+        p.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    except Exception:
+        # кеш — не критично
+        pass
 
 
 # ───────────────────────────────────────────────────────────
@@ -80,12 +111,16 @@ def main():
         raise SystemExit(f"cookies.txt not found: {COOKIES_FILE}")
 
     # ─── lock ───────────────────────────────────────────────
-    if not daily_lock(LOCK_FILE):
-        print("avg-delivery: already fetched today, skip")
-        return
-
-    # ─── Получаем проценты с Ozon (1 запрос) ────────────────
-    m = get_latest_average_delivery_metrics(COOKIES_FILE)
+    # 1 раз в сутки НЕ делаем сетевой запрос, но при повторном запуске
+    # всё равно заполняем лист из кеша (иначе после очистки ячеек они останутся пустыми).
+    if daily_lock(LOCK_FILE):
+        m = get_latest_average_delivery_metrics(COOKIES_FILE)
+        save_cached_metrics(CACHE_FILE, m)
+    else:
+        m = load_cached_metrics(CACHE_FILE)
+        if not m:
+            print("avg-delivery: already fetched today, and no cache found — skip")
+            return
 
     # ВАЖНО:
     # В листе API Ozon колонка R занята под "Баз лог" (см. sync.py).
