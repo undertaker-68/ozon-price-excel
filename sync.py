@@ -614,7 +614,7 @@ def write_rows_to_sheet(
         values=[["Баз лог"]] + col_r_values,
         value_input_option="USER_ENTERED",
     )
-     ws.update(
+    ws.update(
         range_name="M2:N",
         values=[header[12:14]] + [r[12:14] for r in rows_a_to_n],
         value_input_option="USER_ENTERED",
